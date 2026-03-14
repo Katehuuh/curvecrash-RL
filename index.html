@@ -599,16 +599,16 @@ function physicsStep() {
       }
     }
 
-    // Turn rate scales with speed^(1/3) like the real game
-    const effTurnRate = TURN_RATE * Math.cbrt(speedMult);
-    if (action === 0) p.angle -= effTurnRate;
-    else if (action === 2) p.angle += effTurnRate;
-
-    // Speed boost: expire old, compute multiplicative stack
+    // Speed boost: expire old, compute multiplicative stack (BEFORE steering/move)
     p.speedBoosts = p.speedBoosts.filter(b => b.expire > G.step);
     let speedMult = 1.0;
     for (const b of p.speedBoosts) speedMult *= b.mult;
     p.speed = SPEED * speedMult;
+
+    // Turn rate scales with speed^(1/3) like the real game
+    const effTurnRate = TURN_RATE * Math.cbrt(speedMult);
+    if (action === 0) p.angle -= effTurnRate;
+    else if (action === 2) p.angle += effTurnRate;
 
     // Move
     const nx = p.x + Math.cos(p.angle) * p.speed;
