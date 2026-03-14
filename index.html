@@ -14,7 +14,6 @@ body { background:#0a0a12; color:#e0e0e0; font-family:'Segoe UI',system-ui,sans-
 #sidebar h1 span { color:#888; font-size:12px; font-weight:normal; }
 .btn { padding:10px 16px; border:none; border-radius:6px; font-weight:bold; font-size:14px; cursor:pointer; transition:all .15s; }
 .btn:hover { filter:brightness(1.2); }
-.btn-load { background:#1a6b1a; color:#fff; }
 .btn-start { background:#0066aa; color:#fff; font-size:16px; }
 .btn-start.running { background:#aa2222; }
 .info-box { background:#1a1a2e; border-radius:6px; padding:10px; font-size:12px; line-height:1.6; font-family:monospace; }
@@ -23,15 +22,10 @@ body { background:#0a0a12; color:#e0e0e0; font-family:'Segoe UI',system-ui,sans-
 .info-box .val-warn { color:#f80; }
 .info-box .val-bad { color:#f44; }
 #game-wrap { flex:1; display:flex; align-items:center; justify-content:center; position:relative; }
-canvas#game { background:#0d0d18; border:2px solid #1a1a2e; border-radius:4px; image-rendering:pixelated; }
+canvas#game { background:#0d0d18; border:2px solid #1a1a2e; border-radius:4px; image-rendering:auto; }
 #overlay { position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); text-align:center; pointer-events:none; }
 #overlay h2 { font-size:28px; color:#0ff; text-shadow:0 0 20px #0ff8; margin-bottom:8px; }
 #overlay p { font-size:16px; color:#aaa; }
-#scoreboard { position:absolute; top:12px; left:50%; transform:translateX(-50%); display:flex; gap:24px; font-size:18px; font-weight:bold; }
-.score-item { padding:6px 16px; border-radius:4px; }
-.score-human { background:#1a3a1a; color:#4f4; border:1px solid #4f4; }
-.score-ai { background:#3a1a1a; color:#f44; border:1px solid #f44; }
-.score-draw { background:#2a2a1a; color:#ff0; border:1px solid #ff0; }
 #status-bar { position:absolute; bottom:12px; left:50%; transform:translateX(-50%); font-size:13px; color:#888; background:#12121ecc; padding:4px 12px; border-radius:4px; }
 #controls-hint { font-size:11px; color:#666; text-align:center; line-height:1.5; }
 .speed-sel { display:flex; gap:4px; }
@@ -89,10 +83,10 @@ canvas#game { background:#0d0d18; border:2px solid #1a1a2e; border-radius:4px; i
     </div>
   </div>
   <div id="game-wrap">
-    <canvas id="game" width="922" height="763"></canvas>
+    <canvas id="game" width="512" height="512"></canvas>
     <div id="overlay">
       <h2>CurveCrash AI</h2>
-      <p>Load weights, then press START or Space</p>
+      <p>Press START or Space to play</p>
     </div>
     <div id="status-bar"></div>
   </div>
@@ -101,55 +95,61 @@ canvas#game { background:#0d0d18; border:2px solid #1a1a2e; border-radius:4px; i
 <script>
 'use strict';
 
-// ======================== PHYSICS (match curvecrash_env_ffa.py GS++ mode) ========================
-const FW = 922, FH = 763, FPS = 60;
-const SPEED = 180 / FPS;            // 3 px/frame in field coords
-const TURN_RADIUS = 38.5;
-const TURN_RATE = (180/FPS) / TURN_RADIUS; // rad/frame
-const TRAIL_W = 6.3;                // trail diameter in field coords
-const TRAIL_HW = TRAIL_W / 2;
-const GAP_LEN = 22.4;               // gap length in field px
-const GAP_INT_MIN = 1.1, GAP_INT_MAX = 2.0; // seconds between gaps
-const GAP_DUR = 0.159;              // gap duration seconds (GS++ uses fixed distance, approximate with time)
-const MAX_STEPS = 10800;            // 3600 agent steps * FRAME_SKIP=3 = 180s
-const WALL_T = 4;                   // wall thickness in field px
-
-// Observation constants (match env) — must be before powerup constants
+// ======================== PHYSICS (512x512 sim grid, matching curvecrash_env_ffa.py GS++ mode) ========================
+const A = 512;                              // ARENA_SIM
+const FPS = 60;
+const DT = 1.0 / FPS;
+// GS++ ratios from replay data (raw / 922 field width)
+const SPEED_RATIO = 180.0 / 922;            // ≈ 0.1952
+const TR_RATIO = 38.5 / 922;               // ≈ 0.04175
+const TW_RATIO = 6.3 / 922;                // ≈ 0.006832
+const GL_RATIO = 22.4 / 922;               // ≈ 0.02429
+// Sim-resolution values
+const SPEED_PS = SPEED_RATIO * A;           // ~100 px/s
+const TURN_RADIUS = TR_RATIO * A;           // ~21.4 px
+const TURN_RATE_PS = SPEED_PS / TURN_RADIUS;// ~4.68 rad/s
+const TRAIL_W = TW_RATIO * A;              // ~3.5 px
+const TRAIL_HW = Math.max(1, Math.round(TRAIL_W / 2)); // 2
+const HEAD_R = Math.max(1, Math.round(TRAIL_W / 2));    // 2
+const GAP_LEN = GL_RATIO * A;              // ~12.4 px
+const GAP_INT_MIN = 1.1, GAP_INT_MAX = 2.0;// seconds between gaps
+const WM = TRAIL_W / 2 + 1;                // ~2.75 wall collision margin
+const ARENA_H = 424;                       // GS++ rectangular playable height
+const OFF_Y = 44;                          // (512-424)/2 vertical offset
+const MAX_STEPS = 10800;                   // 3600 agent steps * FRAME_SKIP=3 = 180s
+const SKIP_FRAMES = Math.max(8, Math.floor(TRAIL_W * 3)); // ~10 self-collision grace
+const CR = Math.max(1, Math.floor(TRAIL_W / 2) - 1);      // 1 collision check radius
+// Observation
 const OBS = 128;
-const SIM = 512;
-const SIM_SCALE = SIM / FW;
-const DS = SIM / OBS;
-const OBS_SCALE = SIM_SCALE / DS;
-const ARENA_H = Math.round(FH * SIM_SCALE);
-const OFF_Y = Math.floor((SIM - ARENA_H) / 2);
-const OBS_OFF_Y = OFF_Y / DS;
+const DS = A / OBS;                         // 4
+// Powerups
+const PUP_RADIUS = 16;                     // sim px
+const PUP_PICKUP_R = PUP_RADIUS + TRAIL_W / 2; // ~17.75
+const PUP_SPAWN_INT = 76;
+const PUP_FIRST_SPAWN = Math.round(3.5 * FPS);
+const PUP_SPEED_MULT = 2.0;
+const PUP_SPEED_DUR = 4 * FPS;             // 240 frames
 
-// GS++ powerups (after SIM_SCALE is defined)
-const PUP_SPAWN_INT = 76;           // frames between spawns (match env powerup_spawn_interval=76)
-const PUP_VIS_RADIUS = 16 / SIM_SCALE; // visual radius in field px (~29px)
-const PUP_PICKUP_RADIUS = PUP_VIS_RADIUS + TRAIL_HW; // pickup = visual + trail half-width
-const PUP_SPEED_MULT = 2.0;         // speed multiplier per boost (multiplicative stacking)
-const PUP_SPEED_DUR = 4 * FPS;      // speed boost duration (frames)
-const PUP_FIRST_SPAWN = Math.round(3.5 * FPS); // first powerup at ~3.5s
+// Precomputed wall mask at obs resolution (128x128)
+const WALL_MASK = new Float32Array(OBS * OBS);
+{
+  const top_ds = Math.floor(OFF_Y / DS);        // 11
+  const bot_ds = Math.min(OBS, Math.floor((OFF_Y + ARENA_H + DS - 1) / DS)); // 117
+  for (let r = 0; r < top_ds; r++) for (let c = 0; c < OBS; c++) WALL_MASK[r*OBS+c] = 1;
+  for (let r = bot_ds; r < OBS; r++) for (let c = 0; c < OBS; c++) WALL_MASK[r*OBS+c] = 1;
+  if (top_ds >= 0 && top_ds < OBS) for (let c = 0; c < OBS; c++) WALL_MASK[top_ds*OBS+c] = 1;
+  if (bot_ds > 0 && bot_ds <= OBS) for (let c = 0; c < OBS; c++) WALL_MASK[(bot_ds-1)*OBS+c] = 1;
+  for (let r = top_ds; r < bot_ds; r++) { WALL_MASK[r*OBS] = 1; WALL_MASK[r*OBS+OBS-1] = 1; }
+}
 
 // ======================== GAME STATE ========================
 const G = {
-  running: false,
-  players: [],     // [{x, y, angle, alive, trail:[], isHuman, color, gapTimer, inGap, gapDist, speed}]
-  step: 0,
-  maxPlayers: 2,
-  gameSpeed: 1,
+  running: false, players: [], step: 0, maxPlayers: 2, gameSpeed: 1,
   scores: { human: 0, ai: 0, draw: 0, round: 0 },
-  // AI state
-  model: null,
-  inferMs: 0,
-  inferAvg: 0,
-  // Trail grid for collision (field resolution)
-  trailGrid: null, // Uint8Array(FW * FH) — 0=empty, pid=occupied
-  // Powerups
-  powerups: [],    // [{x, y, type:'speed'|'erase', id}]
-  pupIdCounter: 0,
-  pupSpawnTimer: 0,
+  model: null, inferMs: 0, inferAvg: 0,
+  trailOwner: null,  // Int16Array(512*512) — player ID (1-indexed), 0=empty
+  trailFrame: null,  // Int32Array(512*512) — frame when pixel was drawn
+  powerups: [], pupIdCounter: 0, pupSpawnTimer: 0,
 };
 
 // ======================== CANVAS ========================
@@ -159,48 +159,34 @@ const vizC = document.getElementById('ai-viz');
 const vizCtx = vizC.getContext('2d');
 const overlay = document.getElementById('overlay');
 const statusBar = document.getElementById('status-bar');
+// Offscreen canvas for sim→display scaling
+const offC = document.createElement('canvas'); offC.width = A; offC.height = A;
+const offCtx = offC.getContext('2d');
 
 // ======================== INPUT ========================
 const keys = {};
-document.addEventListener('keydown', e => {
-  keys[e.code] = true;
-  if ((e.code === 'Space' || e.code === 'Enter') && !G.running) startRound();
-});
+document.addEventListener('keydown', e => { keys[e.code] = true; if ((e.code === 'Space' || e.code === 'Enter') && !G.running) startRound(); });
 document.addEventListener('keyup', e => { keys[e.code] = false; });
 
 // ======================== UI WIRING ========================
 document.getElementById('btn-load').onclick = loadWeights;
 document.getElementById('btn-start').onclick = () => { if (!G.running) { clearTimeout(G._restartTimer); startRound(); } else endRound('abort'); };
-
-document.getElementById('speed-sel').onclick = e => {
-  if (!e.target.dataset.speed) return;
-  G.gameSpeed = parseFloat(e.target.dataset.speed);
-  document.querySelectorAll('#speed-sel button').forEach(b => b.classList.toggle('active', b === e.target));
-};
-document.getElementById('player-sel').onclick = e => {
-  if (!e.target.dataset.p) return;
-  G.maxPlayers = parseInt(e.target.dataset.p);
-  document.querySelectorAll('#player-sel button').forEach(b => b.classList.toggle('active', b === e.target));
-};
+document.getElementById('speed-sel').onclick = e => { if (!e.target.dataset.speed) return; G.gameSpeed = parseFloat(e.target.dataset.speed); document.querySelectorAll('#speed-sel button').forEach(b => b.classList.toggle('active', b === e.target)); };
+document.getElementById('player-sel').onclick = e => { if (!e.target.dataset.p) return; G.maxPlayers = parseInt(e.target.dataset.p); document.querySelectorAll('#player-sel button').forEach(b => b.classList.toggle('active', b === e.target)); };
 
 // ======================== WEIGHT LOADING ========================
 function loadWeights() {
-  const input = document.createElement('input');
-  input.type = 'file'; input.accept = '.json';
+  const input = document.createElement('input'); input.type = 'file'; input.accept = '.json';
   input.onchange = async e => {
-    const file = e.target.files[0];
-    if (!file) return;
+    const file = e.target.files[0]; if (!file) return;
     const info = document.getElementById('model-info');
     info.innerHTML = '<span class="label">Loading...</span>';
     try {
       const json = JSON.parse(await file.text());
       G.model = buildTFModel(json);
-      const arch = G.model.arch || json.version;
-      info.innerHTML = `<span class="label">Model:</span> <span class="val">${arch} ${G.model.nCh}ch ${json.gru_hidden ? 'GRU('+json.gru_hidden+')' : ''}</span><br><span class="label">CBAM:</span> <span class="val">${G.model.hasCBAM?'ON':'off'}</span> | <span class="label">Params:</span> <span class="val">2.3M</span>`;
+      info.innerHTML = `<span class="label">Model:</span> <span class="val">${G.model.arch} ${G.model.nCh}ch</span>`;
       overlay.querySelector('p').textContent = 'Press START or Space to play!';
-    } catch(err) {
-      info.innerHTML = `<span class="val-bad">Error: ${err.message}</span>`;
-    }
+    } catch(err) { info.innerHTML = `<span class="val-bad">Error: ${err.message}</span>`; }
   };
   input.click();
 }
@@ -217,7 +203,6 @@ function b64toF32(b64str, shape) {
   return tf.tensor(floats, shape);
 }
 function decW(layer, key) {
-  // Support both base64 compact and raw array formats
   if (typeof layer[key] === 'string' && layer[key + '_shape']) return b64toF32(layer[key], layer[key + '_shape']);
   if (layer[key + '_shape']) return tf.tensor(layer[key], layer[key + '_shape']);
   if (Array.isArray(layer[key])) {
@@ -242,21 +227,12 @@ function decGRUGate(g) {
 // ======================== TF.JS MODEL ========================
 function buildTFModel(json) {
   const m = { arch: json.arch || 'naturecnn', nCh: json.n_input_channels || 6 };
-  const layers = json.layers;
-  let idx = 0;
-
+  const layers = json.layers; let idx = 0;
   if (m.arch === 'impala') {
     const ns = json.impala_channels ? json.impala_channels.length : 3;
     m.stages = [];
-    for (let i = 0; i < ns; i++) {
-      const l = layers[idx++];
-      m.stages.push({
-        cW: decW(l,'conv_weight'), cB: decW(l,'conv_bias'),
-        r1c1W: decW(l,'res1_conv1_weight'), r1c1B: decW(l,'res1_conv1_bias'),
-        r1c2W: decW(l,'res1_conv2_weight'), r1c2B: decW(l,'res1_conv2_bias'),
-        r2c1W: decW(l,'res2_conv1_weight'), r2c1B: decW(l,'res2_conv1_bias'),
-        r2c2W: decW(l,'res2_conv2_weight'), r2c2B: decW(l,'res2_conv2_bias'),
-      });
+    for (let i = 0; i < ns; i++) { const l = layers[idx++];
+      m.stages.push({ cW: decW(l,'conv_weight'), cB: decW(l,'conv_bias'), r1c1W: decW(l,'res1_conv1_weight'), r1c1B: decW(l,'res1_conv1_bias'), r1c2W: decW(l,'res1_conv2_weight'), r1c2B: decW(l,'res1_conv2_bias'), r2c1W: decW(l,'res2_conv1_weight'), r2c1B: decW(l,'res2_conv1_bias'), r2c2W: decW(l,'res2_conv2_weight'), r2c2B: decW(l,'res2_conv2_bias') });
     }
   } else {
     m.conv = [];
@@ -268,32 +244,24 @@ function buildTFModel(json) {
   if (m.hasSA) { const l = layers[idx++]; m.sa = { qkv: decW(l,'qkv_weight'), pW: decW(l,'proj_weight'), pB: decW(l,'proj_bias'), nh: l.num_heads, d: l.dim }; }
   const fcL = layers[idx++]; m.fc = { w: decW(fcL,'weight'), b: decW(fcL,'bias') };
   m.hasGRU = json.gru_hidden > 0;
-  if (m.hasGRU) {
-    const gl = layers[idx++]; m.gruH = gl.units; m.gru = {};
-    for (const g of ['reset','update','new']) m.gru[g] = decGRUGate(gl.gates[g]);
-  }
+  if (m.hasGRU) { const gl = layers[idx++]; m.gruH = gl.units; m.gru = {}; for (const g of ['reset','update','new']) m.gru[g] = decGRUGate(gl.gates[g]); }
   const aL = layers[idx++]; m.actor = { w: decW(aL,'weight'), b: decW(aL,'bias') };
   return m;
 }
 
 function aiInfer(obsNhwc, player) {
   if (!G.model) return 1;
-  const t0 = performance.now();
-  const m = G.model;
-  let newGru = null;
+  const t0 = performance.now(); const m = G.model; let newGru = null;
   const act = tf.tidy(() => {
     let x = tf.tensor4d(obsNhwc, [1, OBS, OBS, m.nCh]);
     if (m.arch === 'impala') {
       for (const s of m.stages) {
-        x = tf.conv2d(x, s.cW, 1, 'same').add(s.cB);
-        x = tf.maxPool(x, 3, 2, 'same');
+        x = tf.conv2d(x, s.cW, 1, 'same').add(s.cB); x = tf.maxPool(x, 3, 2, 'same');
         let r = x; x = tf.relu(x); x = tf.conv2d(x, s.r1c1W, 1, 'same').add(s.r1c1B); x = tf.relu(x); x = tf.conv2d(x, s.r1c2W, 1, 'same').add(s.r1c2B); x = x.add(r);
         r = x; x = tf.relu(x); x = tf.conv2d(x, s.r2c1W, 1, 'same').add(s.r2c1B); x = tf.relu(x); x = tf.conv2d(x, s.r2c2W, 1, 'same').add(s.r2c2B); x = x.add(r);
       }
       x = tf.relu(x);
-    } else {
-      for (const c of m.conv) x = tf.relu(tf.conv2d(x, c.w, c.s, 'valid').add(c.b));
-    }
+    } else { for (const c of m.conv) x = tf.relu(tf.conv2d(x, c.w, c.s, 'valid').add(c.b)); }
     if (m.hasCBAM) {
       const af = x.mean([1,2],true).reshape([1,-1]), mf = x.max([1,2],true).reshape([1,-1]);
       x = x.mul(tf.sigmoid(tf.relu(tf.matMul(af,m.cbam.f0)).matMul(m.cbam.f2).add(tf.relu(tf.matMul(mf,m.cbam.f0)).matMul(m.cbam.f2))).reshape([1,1,1,-1]));
@@ -303,8 +271,7 @@ function aiInfer(obsNhwc, player) {
       const sa=m.sa, [B,H,W,C]=x.shape, nt=H*W, hd=sa.d/sa.nh, sc=1/Math.sqrt(hd);
       const tok=x.reshape([1,nt,C]), qkv=tf.matMul(tok,sa.qkv).reshape([1,nt,3,sa.nh,hd]).transpose([2,0,3,1,4]);
       const q=qkv.gather(0).reshape([1,sa.nh,nt,hd]), k=qkv.gather(1).reshape([1,sa.nh,nt,hd]), v=qkv.gather(2).reshape([1,sa.nh,nt,hd]);
-      const att=tf.softmax(tf.matMul(q,k.transpose([0,1,3,2])).mul(sc),-1);
-      x = tok.add(tf.matMul(tf.matMul(att,v).transpose([0,2,1,3]).reshape([1,nt,C]),sa.pW).add(sa.pB)).reshape([1,H,W,C]);
+      x = tok.add(tf.matMul(tf.matMul(tf.softmax(tf.matMul(q,k.transpose([0,1,3,2])).mul(sc),-1),v).transpose([0,2,1,3]).reshape([1,nt,C]),sa.pW).add(sa.pB)).reshape([1,H,W,C]);
     }
     x = tf.relu(tf.matMul(x.reshape([1,-1]),m.fc.w).add(m.fc.b));
     if (m.hasGRU) {
@@ -321,13 +288,11 @@ function aiInfer(obsNhwc, player) {
   });
   if (newGru) { if (player.gruTensor) player.gruTensor.dispose(); player.gruTensor = newGru; }
   const ms = performance.now() - t0;
-  G.inferMs = ms;
-  G.inferAvg = G.inferAvg > 0 ? G.inferAvg * 0.9 + ms * 0.1 : ms;
+  G.inferMs = ms; G.inferAvg = G.inferAvg > 0 ? G.inferAvg * 0.9 + ms * 0.1 : ms;
   return act;
 }
 
-// ======================== OBSERVATION BUILDING ========================
-// Precomputed rotation index map — built once per obs, reused for all 7 channels
+// ======================== OBSERVATION (matches env exactly) ========================
 function buildRotMap(hx, hy, hdg) {
   const N=OBS, half=N/2, cos=Math.cos(hdg), sin=Math.sin(hdg);
   const map = new Int32Array(N*N);
@@ -344,191 +309,225 @@ function rotChMap(ch, map, fill) {
   for (let i=0; i<OBS*OBS; i++) { const j=map[i]; out[i]=j>=0?ch[j]:fill; }
   return out;
 }
-// Fallback for cases without precomputed map
-function rotCh(ch, hx, hy, hdg, fill) {
-  return rotChMap(ch, buildRotMap(hx, hy, hdg), fill);
+
+function buildObs(pid) {
+  // Step 1: bool masks at 512x512 from trailOwner
+  const AA = A*A, N = OBS, NN = N*N;
+  const selfDs = new Float32Array(NN), enemyDs = new Float32Array(NN);
+
+  // Step 2: downsample 512→128 with .any() over 4x4 blocks
+  for (let or = 0; or < N; or++) {
+    for (let oc = 0; oc < N; oc++) {
+      let hasSelf = false, hasEnemy = false;
+      const baseR = or * DS, baseC = oc * DS;
+      for (let dy = 0; dy < DS && !(hasSelf && hasEnemy); dy++) {
+        const row = baseR + dy;
+        for (let dx = 0; dx < DS; dx++) {
+          const v = G.trailOwner[row * A + baseC + dx];
+          if (v === pid) hasSelf = true;
+          else if (v > 0) hasEnemy = true;
+        }
+      }
+      if (hasSelf) selfDs[or*N+oc] = 1;
+      if (hasEnemy) enemyDs[or*N+oc] = 1;
+    }
+  }
+
+  // Step 3: add wall mask
+  for (let i = 0; i < NN; i++) if (WALL_MASK[i]) selfDs[i] = 1;
+
+  // Step 4: direction arrows (5px at obs res)
+  const me = G.players.find(p => p.id === pid);
+  if (!me) return null;
+  for (const p of G.players) {
+    if (!p.alive) continue;
+    const ch = (p.id === pid) ? selfDs : enemyDs;
+    const px = p.x / DS, py = p.y / DS;
+    const cos_a = Math.cos(p.angle), sin_a = Math.sin(p.angle);
+    for (let t = 0; t < 5; t++) {
+      const ax = Math.round(px + cos_a * t), ay = Math.round(py + sin_a * t);
+      if (ax >= 0 && ax < N && ay >= 0 && ay < N) ch[ay*N+ax] = 1;
+    }
+  }
+
+  // Step 5: powerup grids at obs res
+  const spdCh = new Float32Array(NN), ersCh = new Float32Array(NN);
+  const pupRds = Math.max(1, Math.round(PUP_RADIUS / DS)); // 4
+  for (const pup of G.powerups) {
+    const px = Math.round(pup.x / DS), py = Math.round(pup.y / DS);
+    const ch = pup.type === 'speed' ? spdCh : ersCh;
+    for (let dy = -pupRds; dy <= pupRds; dy++) for (let dx = -pupRds; dx <= pupRds; dx++) {
+      if (dx*dx+dy*dy <= pupRds*pupRds) { const cx=px+dx, cy=py+dy; if(cx>=0&&cx<N&&cy>=0&&cy<N) ch[cy*N+cx]=1; }
+    }
+  }
+
+  // Step 6: ego-centric rotation (shared map for all channels)
+  const hx = me.x / DS, hy = me.y / DS, hdg = me.angle;
+  const rmap = buildRotMap(hx, hy, hdg);
+  const rS = rotChMap(selfDs, rmap, 1), rE = rotChMap(enemyDs, rmap, 0);
+  const rSpd = rotChMap(spdCh, rmap, 0), rErs = rotChMap(ersCh, rmap, 0);
+
+  // Step 7: previous frame channels (world-frame, rotated with current heading)
+  let rPS, rPE;
+  if (me.prevSelf) { rPS = rotChMap(me.prevSelf, rmap, 1); rPE = rotChMap(me.prevEnemy, rmap, 0); }
+  else { const z = new Float32Array(NN); rPS = rotChMap(z, rmap, 1); rPE = rotChMap(z, rmap, 0); }
+
+  // Voronoi
+  const nCh = G.model ? G.model.nCh : 7;
+  let rV = null;
+  if (nCh >= 7) {
+    // BFS at obs resolution
+    const blocked = new Uint8Array(NN), territory = new Uint8Array(NN);
+    for (let i = 0; i < NN; i++) if (selfDs[i] > .5 || enemyDs[i] > .5) blocked[i] = 1;
+    const ehx = Math.round(hx), ehy = Math.round(hy), ei = ehy*N+ehx;
+    let egoQ = [], enemyQ = [];
+    if (ei >= 0 && ei < NN && !blocked[ei]) { territory[ei] = 1; blocked[ei] = 1; egoQ.push(ei); }
+    for (const p of G.players) {
+      if (!p.alive || p.id === pid) continue;
+      const ex = Math.round(p.x/DS), ey = Math.round(p.y/DS), idx = ey*N+ex;
+      if (idx >= 0 && idx < NN && !blocked[idx]) { territory[idx] = 2; blocked[idx] = 1; enemyQ.push(idx); }
+    }
+    while (egoQ.length || enemyQ.length) {
+      let nE = [];
+      for (const i of egoQ) { const c=i%N, r=(i-c)/N;
+        if(c>0&&!blocked[i-1]){blocked[i-1]=1;territory[i-1]=1;nE.push(i-1);}
+        if(c<N-1&&!blocked[i+1]){blocked[i+1]=1;territory[i+1]=1;nE.push(i+1);}
+        if(r>0&&!blocked[i-N]){blocked[i-N]=1;territory[i-N]=1;nE.push(i-N);}
+        if(r<N-1&&!blocked[i+N]){blocked[i+N]=1;territory[i+N]=1;nE.push(i+N);}
+      }
+      let nX = [];
+      for (const i of enemyQ) { const c=i%N, r=(i-c)/N;
+        if(c>0&&!blocked[i-1]){blocked[i-1]=1;territory[i-1]=2;nX.push(i-1);}
+        if(c<N-1&&!blocked[i+1]){blocked[i+1]=1;territory[i+1]=2;nX.push(i+1);}
+        if(r>0&&!blocked[i-N]){blocked[i-N]=1;territory[i-N]=2;nX.push(i-N);}
+        if(r<N-1&&!blocked[i+N]){blocked[i+N]=1;territory[i+N]=2;nX.push(i+N);}
+      }
+      egoQ = nE; enemyQ = nX;
+    }
+    const vor = new Float32Array(NN);
+    for (let i = 0; i < NN; i++) if (territory[i] === 1) vor[i] = 1;
+    rV = rotChMap(vor, rmap, 0);
+  }
+
+  // Step 8: stack NHWC
+  const obs = new Float32Array(NN * nCh);
+  for (let i = 0; i < NN; i++) {
+    obs[i*nCh] = rS[i]; obs[i*nCh+1] = rE[i]; obs[i*nCh+2] = rPS[i]; obs[i*nCh+3] = rPE[i];
+    obs[i*nCh+4] = rSpd[i]; obs[i*nCh+5] = rErs[i];
+    if (nCh >= 7) obs[i*nCh+6] = rV[i];
+  }
+
+  // Store world-frame for next frame's prev channels
+  me.prevSelf = selfDs; me.prevEnemy = enemyDs;
+  G._vizSelf = selfDs; G._vizEnemy = enemyDs;
+  return obs;
 }
 
-function buildTrailGrids(pid) {
-  // Build 128x128 self/enemy trail grids from player trail data
-  const N = OBS, NN = N*N;
-  const selfCh = new Float32Array(NN), enemyCh = new Float32Array(NN);
-
-  // Draw trails
-  for (const p of G.players) {
-    if (!p.alive && p.trail.length === 0) continue;
-    const ch = (p.id === pid) ? selfCh : enemyCh;
-    for (const seg of p.trail) {
-      const ox = Math.round(seg.x * OBS_SCALE);
-      const oy = Math.round(seg.y * OBS_SCALE + OBS_OFF_Y);
-      if (ox >= 0 && ox < N && oy >= 0 && oy < N) ch[oy*N+ox] = 1.0;
-      // Stamp small radius
-      for (let dy=-1; dy<=1; dy++) for (let dx=-1; dx<=1; dx++) {
-        const cx=ox+dx, cy=oy+dy;
-        if (cx>=0&&cx<N&&cy>=0&&cy<N) ch[cy*N+cx]=1.0;
+// ======================== TRAIL DRAWING (matches env _draw_trail) ========================
+function drawTrail(p) {
+  const x = p.x, y = p.y, px = p._prevDrawX, py = p._prevDrawY;
+  const dx = x - px, dy = y - py;
+  const dist = Math.sqrt(dx*dx + dy*dy);
+  const nStamps = Math.max(1, Math.ceil(dist));
+  // Perpendicular direction
+  let perpX, perpY;
+  if (dist > 0.5) { perpX = -dy/dist; perpY = dx/dist; }
+  else { perpX = -Math.sin(p.angle); perpY = Math.cos(p.angle); }
+  // Stamp perpendicular line at each interpolated point
+  for (let s = 0; s <= nStamps; s++) {
+    const t = s / nStamps;
+    const sx = px + dx*t, sy = py + dy*t;
+    for (let i = -TRAIL_HW; i <= TRAIL_HW; i++) {
+      const cx = Math.round(sx + perpX*i), cy = Math.round(sy + perpY*i);
+      if (cx >= 0 && cx < A && cy >= 0 && cy < A) {
+        G.trailOwner[cy*A+cx] = p.id;
+        G.trailFrame[cy*A+cx] = G.step;
       }
     }
   }
-
-  // Walls (GS++ mode: top/bottom bands + border)
-  const top_ds = Math.floor(OFF_Y / DS);
-  const bot_ds = Math.min(N, Math.floor((OFF_Y + ARENA_H + DS - 1) / DS));
-  for (let r=0; r<top_ds; r++) for (let c=0; c<N; c++) selfCh[r*N+c]=1;
-  for (let r=bot_ds; r<N; r++) for (let c=0; c<N; c++) selfCh[r*N+c]=1;
-  if (top_ds>=0&&top_ds<N) for (let c=0;c<N;c++) selfCh[top_ds*N+c]=1;
-  if (bot_ds>0&&bot_ds<=N) for (let c=0;c<N;c++) selfCh[(bot_ds-1)*N+c]=1;
-  for (let r=top_ds; r<bot_ds; r++) { selfCh[r*N]=1; selfCh[r*N+N-1]=1; }
-
-  // Direction arrows
-  for (const p of G.players) {
-    if (!p.alive) continue;
-    const ch = (p.id === pid) ? selfCh : enemyCh;
-    const px = p.x * OBS_SCALE, py = p.y * OBS_SCALE + OBS_OFF_Y;
-    for (let t=0; t<5; t++) {
-      const ax=Math.round(px+Math.cos(p.angle)*t), ay=Math.round(py+Math.sin(p.angle)*t);
-      if (ax>=0&&ax<N&&ay>=0&&ay<N) ch[ay*N+ax]=1;
+  // Head circle
+  const ix = Math.round(x), iy = Math.round(y);
+  for (let dy2 = -HEAD_R; dy2 <= HEAD_R; dy2++) for (let dx2 = -HEAD_R; dx2 <= HEAD_R; dx2++) {
+    if (dx2*dx2+dy2*dy2 <= HEAD_R*HEAD_R) {
+      const cx = ix+dx2, cy = iy+dy2;
+      if (cx >= 0 && cx < A && cy >= 0 && cy < A) { G.trailOwner[cy*A+cx] = p.id; G.trailFrame[cy*A+cx] = G.step; }
     }
   }
-  return { self: selfCh, enemy: enemyCh };
+  p._prevDrawX = x; p._prevDrawY = y;
 }
 
-function computeVoronoi(selfCh, enemyCh, pid) {
-  const N=OBS, NN=N*N;
-  const blocked = new Uint8Array(NN);
-  for (let i=0;i<NN;i++) if (selfCh[i]>.5||enemyCh[i]>.5) blocked[i]=1;
-  const territory = new Uint8Array(NN);
-  const me = G.players.find(p=>p.id===pid);
-  if (!me) return new Float32Array(NN);
-  const ehx=Math.round(me.x*OBS_SCALE), ehy=Math.round(me.y*OBS_SCALE+OBS_OFF_Y);
-  const ei=ehy*N+ehx;
-  let egoQ=[], enemyQ=[];
-  if (ei>=0&&ei<NN&&!blocked[ei]) { territory[ei]=1; blocked[ei]=1; egoQ.push(ei); }
-  for (const p of G.players) {
-    if (!p.alive||p.id===pid) continue;
-    const ex=Math.round(p.x*OBS_SCALE), ey=Math.round(p.y*OBS_SCALE+OBS_OFF_Y), idx=ey*N+ex;
-    if (idx>=0&&idx<NN&&!blocked[idx]) { territory[idx]=2; blocked[idx]=1; enemyQ.push(idx); }
-  }
-  while (egoQ.length||enemyQ.length) {
-    let nE=[];
-    for (const i of egoQ) { const c=i%N,r=(i-c)/N;
-      if(c>0&&!blocked[i-1]){blocked[i-1]=1;territory[i-1]=1;nE.push(i-1);}
-      if(c<N-1&&!blocked[i+1]){blocked[i+1]=1;territory[i+1]=1;nE.push(i+1);}
-      if(r>0&&!blocked[i-N]){blocked[i-N]=1;territory[i-N]=1;nE.push(i-N);}
-      if(r<N-1&&!blocked[i+N]){blocked[i+N]=1;territory[i+N]=1;nE.push(i+N);}
+// ======================== COLLISION (matches env _check_collision) ========================
+function checkCollision(x, y, pid) {
+  // Wall (GS++ rectangular)
+  if (x < WM || x >= A - WM || y < OFF_Y + WM || y >= OFF_Y + ARENA_H - WM) return true;
+  // Trail (swept from prev to current is handled by caller)
+  const minFrame = G.step - SKIP_FRAMES;
+  for (let dy = -CR; dy <= CR; dy++) for (let dx = -CR; dx <= CR; dx++) {
+    if (dx*dx+dy*dy > CR*CR) continue;
+    const cx = Math.round(x+dx), cy = Math.round(y+dy);
+    if (cx < 0 || cx >= A || cy < 0 || cy >= A) return true;
+    const owner = G.trailOwner[cy*A+cx];
+    if (owner > 0) {
+      if (owner === pid && G.trailFrame[cy*A+cx] < minFrame) return true; // old self trail
+      if (owner !== pid) return true; // enemy trail
     }
-    let nX=[];
-    for (const i of enemyQ) { const c=i%N,r=(i-c)/N;
-      if(c>0&&!blocked[i-1]){blocked[i-1]=1;territory[i-1]=2;nX.push(i-1);}
-      if(c<N-1&&!blocked[i+1]){blocked[i+1]=1;territory[i+1]=2;nX.push(i+1);}
-      if(r>0&&!blocked[i-N]){blocked[i-N]=1;territory[i-N]=2;nX.push(i-N);}
-      if(r<N-1&&!blocked[i+N]){blocked[i+N]=1;territory[i+N]=2;nX.push(i+N);}
-    }
-    egoQ=nE; enemyQ=nX;
   }
-  const v=new Float32Array(NN);
-  for (let i=0;i<NN;i++) if(territory[i]===1) v[i]=1;
-  return v;
+  return false;
 }
 
-function buildAIObs(pid) {
-  const {self: selfCh, enemy: enemyCh} = buildTrailGrids(pid);
-  const me = G.players.find(p=>p.id===pid);
-  if (!me) return null;
-  const hx=me.x*OBS_SCALE, hy=me.y*OBS_SCALE+OBS_OFF_Y, hdg=me.angle;
-
-  // Build rotation map ONCE, reuse for all 7 channels
-  const rmap = buildRotMap(hx, hy, hdg);
-  const rS=rotChMap(selfCh,rmap,1), rE=rotChMap(enemyCh,rmap,0);
-  let rPS, rPE;
-  if (me.prevSelf) { rPS=rotChMap(me.prevSelf,rmap,1); rPE=rotChMap(me.prevEnemy,rmap,0); }
-  else { const z=new Float32Array(OBS*OBS); rPS=rotChMap(z,rmap,1); rPE=rotChMap(z,rmap,0); }
-  // Powerup channels
-  const N = OBS, NN = N*N;
-  const spdCh = new Float32Array(NN), ersCh = new Float32Array(NN);
-  const pupR = Math.max(1, Math.round(N * 0.03));
-  for (const pup of G.powerups) {
-    const px = Math.round(pup.x * OBS_SCALE), py = Math.round(pup.y * OBS_SCALE + OBS_OFF_Y);
-    const ch = pup.type === 'speed' ? spdCh : ersCh;
-    for (let dy=-pupR; dy<=pupR; dy++) for (let dx=-pupR; dx<=pupR; dx++) {
-      if (dx*dx+dy*dy<=pupR*pupR) { const cx=px+dx, cy=py+dy; if(cx>=0&&cx<N&&cy>=0&&cy<N) ch[cy*N+cx]=1; }
-    }
+function sweptCollision(p) {
+  const px = p._prevMoveX ?? p.x, py = p._prevMoveY ?? p.y;
+  const dx = p.x - px, dy = p.y - py;
+  const dist = Math.sqrt(dx*dx + dy*dy);
+  const steps = Math.max(1, Math.ceil(dist));
+  for (let s = 1; s <= steps; s++) {
+    const t = s / steps;
+    if (checkCollision(px + dx*t, py + dy*t, p.id)) return true;
   }
-  const rSpd = rotChMap(spdCh,rmap,0), rErs = rotChMap(ersCh,rmap,0);
-  // Voronoi
-  const nCh = G.model ? G.model.nCh : 7;
-  const obs = new Float32Array(NN * nCh);
-  let rV = null;
-  if (nCh >= 7) rV = rotChMap(computeVoronoi(selfCh, enemyCh, pid), rmap, 0);
-  for (let i=0; i<NN; i++) {
-    obs[i*nCh+0]=rS[i]; obs[i*nCh+1]=rE[i]; obs[i*nCh+2]=rPS[i]; obs[i*nCh+3]=rPE[i];
-    obs[i*nCh+4]=rSpd[i]; obs[i*nCh+5]=rErs[i];
-    if (nCh>=7) obs[i*nCh+6]=rV[i];
-  }
-  // Cache for viz + next frame
-  me.prevSelf = selfCh; me.prevEnemy = enemyCh;
-  G._vizSelf = selfCh; G._vizEnemy = enemyCh;
-  return obs;
+  return false;
 }
 
 // ======================== GAME LOGIC ========================
 const COLORS = [
-  {r:80,g:255,b:80, hex:'#50ff50', name:'Human'},     // green for human (always index 0)
-  {r:255,g:80,b:80, hex:'#ff5050', name:'AI 1'},       // red
-  {r:80,g:180,b:255, hex:'#50b4ff', name:'AI 2'},      // blue
-  {r:255,g:200,b:50, hex:'#ffc832', name:'AI 3'},      // yellow
-  {r:200,g:80,b:255, hex:'#c850ff', name:'AI 4'},      // purple
-  {r:255,g:140,b:50, hex:'#ff8c32', name:'AI 5'},      // orange
+  {hex:'#50ff50', rgb:[80,255,80]},   // 0: human green
+  {hex:'#ff5050', rgb:[255,80,80]},   // 1: AI red
+  {hex:'#50b4ff', rgb:[80,180,255]},  // 2: blue
+  {hex:'#ffc832', rgb:[255,200,50]},  // 3: yellow
+  {hex:'#c850ff', rgb:[200,80,255]},  // 4: purple
+  {hex:'#ff8c32', rgb:[255,140,50]},  // 5: orange
 ];
 
 function spawnPlayer(id, isHuman) {
-  const margin = Math.round(FW * 0.15); // ~138 field px, matching env
-  const minDist = Math.round(FW * 0.08); // ~74 field px min spacing
+  const margin = Math.round(A * 0.15); // ~77 sim px
+  const minDist = Math.round(A * 0.08); // ~41 sim px
   let x, y, attempts = 0;
   do {
-    x = margin + Math.random() * (FW - 2*margin);
-    y = margin + Math.random() * (FH - 2*margin);
+    x = margin + Math.random() * (A - 2*margin);
+    y = OFF_Y + margin + Math.random() * (ARENA_H - 2*margin);
     attempts++;
-  } while (attempts < 50 && G.players.some(p => {
-    const dx = p.x-x, dy = p.y-y;
-    return dx*dx+dy*dy < minDist*minDist;
-  }));
-  const angle = Math.random() * Math.PI * 2;
+  } while (attempts < 50 && G.players.some(p => { const d2=(p.x-x)**2+(p.y-y)**2; return d2<minDist*minDist; }));
   return {
-    id, x, y, angle, alive: true, isHuman,
-    color: COLORS[id],
-    trail: [],
-    speed: SPEED,
-    speedBoosts: [], // [{expire: frameCount, mult: 2.0}, ...] — multiplicative stacking
-    spawning: true,  // true during 3s grace period — no trail, no gaps, no collision
-    prevSelf: null,  // per-player previous frame channels for AI obs
-    prevEnemy: null,
-    gruTensor: null, // per-player GRU hidden state (tf.keep'd)
-    // Gap mechanics
-    gapTimer: (GAP_INT_MIN + Math.random() * (GAP_INT_MAX - GAP_INT_MIN)) * FPS,
-    inGap: false,
-    gapDist: 0,
-    stepCount: 0,
+    id: id + 1, // 1-indexed like env
+    x, y, angle: Math.random() * Math.PI * 2,
+    alive: true, isHuman, color: COLORS[id],
+    speed: 0, speedBoosts: [],
+    spawning: true, stepCount: 0,
+    prevSelf: null, prevEnemy: null, gruTensor: null,
+    gapTimer: 0, gapRemaining: 0, nextGapAt: GAP_INT_MIN + Math.random()*(GAP_INT_MAX-GAP_INT_MIN),
+    drawing: false,
+    _prevDrawX: 0, _prevDrawY: 0, _prevMoveX: 0, _prevMoveY: 0, _lastAction: 1,
   };
 }
 
 function startRound() {
-  G.players = [];
-  G.step = 0;
-  G.prevSelf = null;
-  G.prevEnemy = null;
-  // Dispose per-player GRU tensors
-  for (const p of G.players) { if (p.gruTensor) { p.gruTensor.dispose(); p.gruTensor = null; } }
-  G.trailGrid = new Uint8Array(FW * FH);
-  G.powerups = [];
-  G.pupIdCounter = 0;
-  G.pupSpawnTimer = PUP_FIRST_SPAWN;
-
-  // Spawn human + AI bots
+  for (const p of G.players) if (p.gruTensor) { p.gruTensor.dispose(); }
+  G.players = []; G.step = 0;
+  G.trailOwner = new Int16Array(A*A);
+  G.trailFrame = new Int32Array(A*A);
+  G.powerups = []; G.pupIdCounter = 0; G.pupSpawnTimer = PUP_FIRST_SPAWN;
   G.players.push(spawnPlayer(0, true));
   for (let i = 1; i < G.maxPlayers; i++) G.players.push(spawnPlayer(i, false));
-
-  G.running = true;
-  G.scores.round++;
+  G.running = true; G.scores.round++;
   overlay.style.display = 'none';
   document.getElementById('btn-start').textContent = 'STOP';
   document.getElementById('btn-start').classList.add('running');
@@ -539,28 +538,17 @@ function endRound(reason) {
   G.running = false;
   const alive = G.players.filter(p => p.alive);
   let msg = '';
-  if (reason === 'abort') { msg = 'Round aborted'; }
+  if (reason === 'abort') msg = 'Round aborted';
   else if (alive.length === 0) { G.scores.draw++; msg = 'Draw!'; }
-  else if (alive.length === 1) {
-    if (alive[0].isHuman) { G.scores.human++; msg = 'You win!'; }
-    else { G.scores.ai++; msg = 'AI wins!'; }
-  } else if (!G.players[0].alive) { G.scores.ai++; msg = 'AI wins!'; }
+  else if (alive.length === 1) { if (alive[0].isHuman) { G.scores.human++; msg = 'You win!'; } else { G.scores.ai++; msg = 'AI wins!'; } }
+  else if (!G.players[0].alive) { G.scores.ai++; msg = 'AI wins!'; }
   else { G.scores.human++; msg = 'You survived!'; }
-
   overlay.style.display = '';
   overlay.querySelector('h2').textContent = msg;
   overlay.querySelector('p').textContent = 'Next round in 2s...';
   updateScoreUI();
-
-  // Auto-restart after 2 seconds
-  if (reason !== 'abort') {
-    clearTimeout(G._restartTimer);
-    G._restartTimer = setTimeout(() => startRound(), 2000);
-  } else {
-    document.getElementById('btn-start').textContent = 'START GAME';
-    document.getElementById('btn-start').classList.remove('running');
-    overlay.querySelector('p').textContent = 'Press Space to play again';
-  }
+  if (reason !== 'abort') { clearTimeout(G._restartTimer); G._restartTimer = setTimeout(startRound, 2000); }
+  else { document.getElementById('btn-start').textContent = 'START GAME'; document.getElementById('btn-start').classList.remove('running'); overlay.querySelector('p').textContent = 'Press Space to play again'; }
 }
 
 function updateScoreUI() {
@@ -570,175 +558,95 @@ function updateScoreUI() {
   document.getElementById('s-round').textContent = G.scores.round;
 }
 
-function checkCollision(x, y, pid) {
-  // Wall collision — field boundary with thickness
-  if (x < WALL_T || x >= FW - WALL_T || y < WALL_T || y >= FH - WALL_T) return true;
-  // Trail collision — check grid cells in a small radius around player
-  const hw = Math.ceil(TRAIL_HW * 0.5);
-  for (let dy=-hw; dy<=hw; dy++) for (let dx=-hw; dx<=hw; dx++) {
-    const cx = Math.round(x+dx), cy = Math.round(y+dy);
-    if (cx<0||cx>=FW||cy<0||cy>=FH) return true;
-    const gv = G.trailGrid[cy*FW+cx];
-    if (gv > 0 && gv !== pid+1) return true; // enemy trail = death
-    // Self-collision: use a separate "old trail" grid value
-    // Grid stores pid+1 for recent trail, pid+100 for old trail
-    if (gv === pid+100+1) return true;
-  }
-  return false;
-}
-
-// Age trail stamps: mark old trail as collidable for self
-function ageTrail(pid) {
-  const p = G.players[pid];
-  const ageThreshold = Math.max(0, p.trail.length - 15);
-  const oldVal = pid+100+1;
-  const hw = Math.ceil(TRAIL_HW * 0.5);
-  for (let i = 0; i < ageThreshold; i++) {
-    const t = p.trail[i];
-    for (let dy=-hw; dy<=hw; dy++) for (let dx=-hw; dx<=hw; dx++) {
-      if (dx*dx+dy*dy > hw*hw+1) continue;
-      const cx=Math.round(t.x+dx), cy=Math.round(t.y+dy);
-      if (cx>=0&&cx<FW&&cy>=0&&cy<FH && G.trailGrid[cy*FW+cx] === pid+1) {
-        G.trailGrid[cy*FW+cx] = oldVal;
-      }
-    }
-  }
-}
-
-function stampPoint(x, y, val) {
-  const hw = Math.ceil(TRAIL_HW * 0.5);
-  for (let dy=-hw; dy<=hw; dy++) for (let dx=-hw; dx<=hw; dx++) {
-    if (dx*dx+dy*dy > hw*hw+1) continue;
-    const cx=Math.round(x+dx), cy=Math.round(y+dy);
-    if (cx>=0&&cx<FW&&cy>=0&&cy<FH) G.trailGrid[cy*FW+cx] = val;
-  }
-}
-
-function stampTrailLine(x0, y0, x1, y1, pid) {
-  // Interpolate between prev and current position to fill gaps at high speed
-  const dx = x1-x0, dy = y1-y0;
-  const dist = Math.sqrt(dx*dx+dy*dy);
-  const steps = Math.max(1, Math.ceil(dist / (TRAIL_HW * 0.8)));
-  for (let s=0; s<=steps; s++) {
-    const t = s/steps;
-    stampPoint(x0+dx*t, y0+dy*t, pid+1);
-  }
-}
-
+// ======================== PHYSICS STEP ========================
 function physicsStep() {
   for (const p of G.players) {
     if (!p.alive) continue;
     p.stepCount++;
 
-    // Steering
-    let action = 1; // straight
+    // AI / Human action
+    let action = 1;
     if (p.isHuman) {
       if (keys['ArrowLeft'] || keys['KeyA']) action = 0;
       else if (keys['ArrowRight'] || keys['KeyD']) action = 2;
     } else {
-      // AI decision every 3 frames (FRAME_SKIP=3)
       if (G.model && p.stepCount % 3 === 0) {
-        const obs = buildAIObs(p.id);
+        const obs = buildObs(p.id);
         if (obs) action = aiInfer(obs, p);
         p._lastAction = action;
-      } else {
-        action = p._lastAction || 1;
-      }
+      } else { action = p._lastAction; }
     }
 
-    // Speed boost: expire old, compute multiplicative stack (BEFORE steering/move)
+    // Speed boost
     p.speedBoosts = p.speedBoosts.filter(b => b.expire > G.step);
     let speedMult = 1.0;
     for (const b of p.speedBoosts) speedMult *= b.mult;
-    p.speed = SPEED * speedMult;
+    const effSpeed = SPEED_PS * speedMult;
 
-    // Turn rate scales with speed^(1/3) like the real game
-    const effTurnRate = TURN_RATE * Math.cbrt(speedMult);
-    if (action === 0) p.angle -= effTurnRate;
-    else if (action === 2) p.angle += effTurnRate;
-
-    // Move
-    const nx = p.x + Math.cos(p.angle) * p.speed;
-    const ny = p.y + Math.sin(p.angle) * p.speed;
-
-    // End spawning after 3s grace
-    if (p.spawning && p.stepCount > 180) {
-      p.spawning = false;
-      p._prevDrawX = p.x; p._prevDrawY = p.y;
+    // Steer
+    const steer = action - 1; // -1, 0, +1
+    if (steer !== 0) {
+      const effTR = TURN_RATE_PS * Math.cbrt(speedMult);
+      p.angle += steer * effTR * DT;
     }
 
     // Move
-    p.x = nx; p.y = ny;
-
-    // During spawning: just move, no collision/trail/gaps/pickup
-    if (p.spawning) continue;
-
-    // Gap mechanics (only after spawning ends)
-    p.gapTimer--;
-    if (!p.inGap && p.gapTimer <= 0) {
-      p.inGap = true;
-      p.gapDist = 0;
-    }
-    if (p.inGap) {
-      p.gapDist += p.speed;
-      if (p.gapDist >= GAP_LEN * (1.0 + (Math.random() - 0.5) * 0.032)) {
-        p.inGap = false;
-        p.gapTimer = (GAP_INT_MIN + Math.random() * (GAP_INT_MAX - GAP_INT_MIN)) * FPS;
-      }
-    }
-
-    // Swept collision: check along the path from prev to current
-    const prevX = p._prevMoveX ?? p.x, prevY = p._prevMoveY ?? p.y;
-    const mdx = p.x - prevX, mdy = p.y - prevY;
-    const mdist = Math.sqrt(mdx*mdx + mdy*mdy);
-    let hit = false;
-    if (mdist > 1) {
-      const csteps = Math.ceil(mdist);
-      for (let cs = 1; cs <= csteps; cs++) {
-        const t = cs / csteps;
-        if (checkCollision(prevX + mdx*t, prevY + mdy*t, p.id)) { hit = true; break; }
-      }
-    } else {
-      hit = checkCollision(p.x, p.y, p.id);
-    }
     p._prevMoveX = p.x; p._prevMoveY = p.y;
-    if (hit) { p.alive = false; continue; }
+    p.x += Math.cos(p.angle) * effSpeed * DT;
+    p.y += Math.sin(p.angle) * effSpeed * DT;
 
-    // Powerup pickup (not during spawning)
+    // Spawn grace (3 seconds = 180 frames)
+    if (p.spawning) {
+      if (p.stepCount > 180) {
+        p.spawning = false;
+        p.drawing = true;
+        p.gapTimer = 0;
+        p._prevDrawX = p.x; p._prevDrawY = p.y;
+      }
+      continue; // no collision/trail/gap during spawning
+    }
+
+    // Gap mechanics (distance-based)
+    p.gapTimer += DT;
+    if (p.gapRemaining > 0) {
+      p.gapRemaining -= effSpeed * DT;
+      if (p.gapRemaining <= 0) {
+        p.drawing = true;
+        p.gapTimer = 0;
+        p._prevDrawX = p.x; p._prevDrawY = p.y;
+        p.nextGapAt = GAP_INT_MIN + Math.random() * (GAP_INT_MAX - GAP_INT_MIN);
+      }
+    } else if (p.gapTimer >= p.nextGapAt) {
+      p.drawing = false;
+      const jitter = (Math.random() - 0.5) * 0.032;
+      p.gapRemaining = GAP_LEN * (1.0 + jitter);
+    }
+
+    // Collision (swept)
+    if (sweptCollision(p)) { p.alive = false; continue; }
+
+    // Powerup pickup
     for (let pi = G.powerups.length - 1; pi >= 0; pi--) {
       const pup = G.powerups[pi];
-      const pdx = p.x - pup.x, pdy = p.y - pup.y;
-      if (pdx*pdx + pdy*pdy < PUP_PICKUP_RADIUS * PUP_PICKUP_RADIUS) {
-        if (pup.type === 'speed') {
-          p.speedBoosts.push({ expire: G.step + PUP_SPEED_DUR, mult: PUP_SPEED_MULT });
-        } else if (pup.type === 'erase') {
-          G.trailGrid.fill(0);
-          for (const pl of G.players) pl.trail = [];
-        }
+      const d2 = (p.x-pup.x)**2 + (p.y-pup.y)**2;
+      if (d2 < PUP_PICKUP_R * PUP_PICKUP_R) {
+        if (pup.type === 'speed') p.speedBoosts.push({ expire: G.step + PUP_SPEED_DUR, mult: PUP_SPEED_MULT });
+        else { G.trailOwner.fill(0); G.trailFrame.fill(0); }
         G.powerups.splice(pi, 1);
       }
     }
 
-    // Stamp trail (if not in gap) — interpolate to fill gaps at high speed
-    if (!p.inGap) {
-      const px = p._prevDrawX ?? p.x, py = p._prevDrawY ?? p.y;
-      stampTrailLine(px, py, p.x, p.y, p.id);
-      p.trail.push({x: p.x, y: p.y});
-      ageTrail(p.id);
-      p._prevDrawX = p.x; p._prevDrawY = p.y;
-    } else {
-      p._prevDrawX = p.x; p._prevDrawY = p.y;
-    }
+    // Draw trail
+    if (p.drawing) drawTrail(p);
   }
 
   // Spawn powerups
   G.pupSpawnTimer--;
   if (G.pupSpawnTimer <= 0) {
-    const margin = Math.round(PUP_VIS_RADIUS * 2); // ~58 field px, matching env
-    const px = margin + Math.random() * (FW - 2*margin);
-    const py = margin + Math.random() * (FH - 2*margin);
-    const type = Math.random() < 2/3 ? 'speed' : 'erase'; // env: speed_weight=2, erase_weight=1
-    G.powerups.push({ x: px, y: py, type, id: G.pupIdCounter++ });
+    const margin = PUP_RADIUS * 2;
+    const px = margin + Math.random() * (A - 2*margin);
+    const py = OFF_Y + margin + Math.random() * (ARENA_H - 2*margin);
+    G.powerups.push({ x: px, y: py, type: Math.random() < 2/3 ? 'speed' : 'erase', id: G.pupIdCounter++ });
     G.pupSpawnTimer = PUP_SPAWN_INT;
   }
 
@@ -749,108 +657,69 @@ function physicsStep() {
 
 // ======================== RENDERING ========================
 function render() {
-  ctx.fillStyle = '#0d0d18';
-  ctx.fillRect(0, 0, gc.width, gc.height);
-
-  // Walls — visible border matching collision zone
-  ctx.fillStyle = '#2a2a3e';
-  ctx.fillRect(0, 0, FW, WALL_T);           // top
-  ctx.fillRect(0, FH - WALL_T, FW, WALL_T); // bottom
-  ctx.fillRect(0, 0, WALL_T, FH);           // left
-  ctx.fillRect(FW - WALL_T, 0, WALL_T, FH); // right
-  // Inner border line
-  ctx.strokeStyle = '#4a4a6e';
-  ctx.lineWidth = 1;
-  ctx.strokeRect(WALL_T, WALL_T, FW - WALL_T*2, FH - WALL_T*2);
-
-  // Draw powerups using repo assets
+  // Build 512x512 RGB from trailOwner
+  const imgData = offCtx.createImageData(A, A);
+  const d = imgData.data;
+  // Background
+  for (let i = 0; i < A*A; i++) { d[i*4+3] = 255; d[i*4] = 13; d[i*4+1] = 13; d[i*4+2] = 24; }
+  // Walls (GS++ top/bottom bands)
+  const ww = Math.max(1, Math.ceil(WM));
+  for (let y = 0; y < OFF_Y + ww; y++) for (let x = 0; x < A; x++) { const i=(y*A+x)*4; d[i]=42;d[i+1]=42;d[i+2]=62; }
+  for (let y = OFF_Y+ARENA_H-ww; y < A; y++) for (let x = 0; x < A; x++) { const i=(y*A+x)*4; d[i]=42;d[i+1]=42;d[i+2]=62; }
+  for (let y = OFF_Y; y < OFF_Y+ARENA_H; y++) { for (let x=0;x<ww;x++){const i=(y*A+x)*4;d[i]=42;d[i+1]=42;d[i+2]=62;} for(let x=A-ww;x<A;x++){const i=(y*A+x)*4;d[i]=42;d[i+1]=42;d[i+2]=62;} }
+  // Trails
+  for (let i = 0; i < A*A; i++) {
+    const owner = G.trailOwner[i];
+    if (owner > 0) {
+      const ci = Math.min(owner - 1, COLORS.length - 1);
+      const rgb = COLORS[ci].rgb;
+      d[i*4] = rgb[0]; d[i*4+1] = rgb[1]; d[i*4+2] = rgb[2];
+    }
+  }
+  // Powerups
   for (const pup of G.powerups) {
-    const img = pup.type === 'speed' ? G.imgSpeed : G.imgErase;
-    if (img && img.complete) {
-      const sz = PUP_VIS_RADIUS * 2;
-      ctx.drawImage(img, pup.x - sz/2, pup.y - sz/2, sz, sz);
-    } else {
-      // Fallback circle
-      ctx.beginPath();
-      ctx.arc(pup.x, pup.y, PUP_VIS_RADIUS, 0, Math.PI*2);
-      ctx.fillStyle = pup.type === 'speed' ? '#0f0' : '#44f';
-      ctx.fill();
+    const ix = Math.round(pup.x), iy = Math.round(pup.y);
+    const col = pup.type === 'speed' ? [76,175,80] : [50,100,255];
+    for (let dy=-PUP_RADIUS; dy<=PUP_RADIUS; dy++) for (let dx=-PUP_RADIUS; dx<=PUP_RADIUS; dx++) {
+      if (dx*dx+dy*dy<=PUP_RADIUS*PUP_RADIUS) { const cx=ix+dx,cy=iy+dy;
+        if(cx>=0&&cx<A&&cy>=0&&cy<A){const i=(cy*A+cx)*4;d[i]=col[0];d[i+1]=col[1];d[i+2]=col[2];}}
     }
   }
-
-  // Draw trails as connected lines
-  const tw = Math.ceil(TRAIL_W * 0.5);
-  for (const p of G.players) {
-    if (p.trail.length === 0) continue;
-    ctx.strokeStyle = p.color.hex;
-    ctx.lineWidth = tw;
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
-    ctx.beginPath();
-    ctx.moveTo(p.trail[0].x, p.trail[0].y);
-    for (let i = 1; i < p.trail.length; i++) {
-      // Break the line at gap jumps (distance > 2x normal step)
-      const dx = p.trail[i].x - p.trail[i-1].x, dy = p.trail[i].y - p.trail[i-1].y;
-      if (dx*dx + dy*dy > SPEED * SPEED * 16) {
-        ctx.stroke();
-        ctx.beginPath();
-        ctx.moveTo(p.trail[i].x, p.trail[i].y);
-      } else {
-        ctx.lineTo(p.trail[i].x, p.trail[i].y);
-      }
-    }
-    ctx.stroke();
-  }
-
-  // Draw heads
+  // Heads
   for (const p of G.players) {
     if (!p.alive) continue;
-    // Head glow
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, TRAIL_HW + 2, 0, Math.PI*2);
-    ctx.fillStyle = p.color.hex;
-    ctx.fill();
-    // White center
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, 2, 0, Math.PI*2);
-    ctx.fillStyle = '#fff';
-    ctx.fill();
-    // Direction indicator
-    ctx.beginPath();
-    ctx.moveTo(p.x, p.y);
-    ctx.lineTo(p.x + Math.cos(p.angle)*12, p.y + Math.sin(p.angle)*12);
-    ctx.strokeStyle = '#fff8';
-    ctx.lineWidth = 1;
-    ctx.stroke();
+    const ix=Math.round(p.x), iy=Math.round(p.y), hr=HEAD_R+1;
+    for (let dy=-hr;dy<=hr;dy++) for(let dx=-hr;dx<=hr;dx++) {
+      if(dx*dx+dy*dy<=hr*hr){const cx=ix+dx,cy=iy+dy;
+        if(cx>=0&&cx<A&&cy>=0&&cy<A){const i=(cy*A+cx)*4;d[i]=255;d[i+1]=255;d[i+2]=255;}}
+    }
   }
+  offCtx.putImageData(imgData, 0, 0);
+  // Scale to display canvas
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(offC, 0, 0, gc.width, gc.height);
 
-  // Status bar
-  if (G.running) {
-    const alive = G.players.filter(p=>p.alive).length;
-    statusBar.textContent = `Step: ${G.step} | Alive: ${alive}/${G.players.length} | Infer: ${G.inferMs.toFixed(0)}ms (avg ${G.inferAvg.toFixed(0)}ms)`;
-  } else {
-    statusBar.textContent = '';
-  }
+  // Status
+  if (G.running && G.step % 5 === 0) {
+    const alive = G.players.reduce((n,p)=>n+p.alive, 0);
+    statusBar.textContent = `Step: ${G.step} | Alive: ${alive}/${G.players.length} | Infer: ${G.inferMs.toFixed(0)}ms`;
+  } else if (!G.running) statusBar.textContent = '';
 
-  // AI viz — reuse cached grids from buildAIObs (no rebuild)
+  // AI viz
   if (G.running && G._vizSelf) {
-    if (!G._vizImgData) G._vizImgData = vizCtx.createImageData(OBS,OBS);
-    const id = G._vizImgData;
-    const s = G._vizSelf, e = G._vizEnemy;
-    for (let i=0;i<OBS*OBS;i++) { id.data[i*4]=e[i]*255; id.data[i*4+1]=s[i]*200; id.data[i*4+2]=0; id.data[i*4+3]=255; }
+    if (!G._vizImgData) G._vizImgData = vizCtx.createImageData(OBS, OBS);
+    const id = G._vizImgData, s = G._vizSelf, e = G._vizEnemy;
+    for (let i=0;i<OBS*OBS;i++){id.data[i*4]=e[i]*255;id.data[i*4+1]=s[i]*200;id.data[i*4+2]=0;id.data[i*4+3]=255;}
     vizCtx.putImageData(id,0,0);
   }
-
-  // Perf info (throttle DOM updates)
+  // Perf
   if (G.step % 15 === 0 && G.model) {
-    const pi = document.getElementById('perf-info');
-    pi.innerHTML = `<span class="label">Infer:</span> <span class="${G.inferAvg>80?'val-bad':G.inferAvg>40?'val-warn':'val'}">${G.inferMs.toFixed(0)}ms</span> <span class="label">avg</span> <span class="val">${G.inferAvg.toFixed(0)}ms</span> | <span class="val">${G.inferAvg>0?(1000/G.inferAvg).toFixed(0):'?'} fps</span>`;
+    document.getElementById('perf-info').innerHTML = `<span class="label">Infer:</span> <span class="${G.inferAvg>80?'val-bad':G.inferAvg>40?'val-warn':'val'}">${G.inferMs.toFixed(0)}ms</span> avg <span class="val">${G.inferAvg.toFixed(0)}ms</span>`;
   }
 }
 
 // ======================== MAIN LOOP ========================
-let lastTime = 0;
-let accumulator = 0;
+let lastTime = 0, accumulator = 0;
 const STEP_MS = 1000 / FPS;
 
 function gameLoop(ts) {
@@ -858,21 +727,16 @@ function gameLoop(ts) {
   if (!lastTime) { lastTime = ts; return; }
   const dt = Math.min(ts - lastTime, 100);
   lastTime = ts;
-
   if (G.running) {
     accumulator += dt * G.gameSpeed;
     let steps = 0;
-    while (accumulator >= STEP_MS && G.running && steps < 10) {
-      physicsStep();
-      accumulator -= STEP_MS;
-      steps++;
-    }
-    if (steps >= 10) accumulator = 0; // prevent spiral
+    while (accumulator >= STEP_MS && G.running && steps < 10) { physicsStep(); accumulator -= STEP_MS; steps++; }
+    if (steps >= 10) accumulator = 0;
   }
   render();
 }
 
-// ======================== AUTO-LOAD WEIGHTS ========================
+// ======================== AUTO-LOAD + INIT ========================
 async function autoLoadWeights() {
   const info = document.getElementById('model-info');
   info.innerHTML = '<span class="label">Loading v8 weights...</span>';
@@ -881,37 +745,27 @@ async function autoLoadWeights() {
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const json = await resp.json();
     G.model = buildTFModel(json);
-    const arch = G.model.arch || json.version;
-    info.innerHTML = `<span class="label">Model:</span> <span class="val">${arch} ${G.model.nCh}ch GRU(${json.gru_hidden})</span><br><span class="label">CBAM:</span> <span class="val">${G.model.hasCBAM?'ON':'off'}</span> | <span class="label">Params:</span> <span class="val">2.3M</span>`;
+    info.innerHTML = `<span class="label">Model:</span> <span class="val">${G.model.arch} ${G.model.nCh}ch</span>`;
     overlay.querySelector('p').textContent = 'Press START or Space to play!';
-    console.log(`Auto-loaded v8 weights (${arch}, ${G.model.nCh}ch)`);
   } catch(e) {
-    info.innerHTML = '<span class="val-warn">Auto-load failed — use Load button</span>';
-    console.warn('Auto-load failed:', e.message);
+    info.innerHTML = '<span class="val-warn">Auto-load failed — use load button</span>';
   }
 }
 
-// ======================== INIT ========================
 async function init() {
   await tf.ready();
-  try { await tf.setBackend('webgl'); } catch(e) { console.warn('WebGL failed, using CPU'); }
-  console.log(`TF.js backend: ${tf.getBackend()}`);
+  try { await tf.setBackend('webgl'); } catch(e) {}
 
   // Scale canvas to fit
   function resizeCanvas() {
     const wrap = document.getElementById('game-wrap');
-    const maxW = wrap.clientWidth - 40;
-    const maxH = wrap.clientHeight - 40;
-    const scale = Math.min(maxW / FW, maxH / FH, 1.5);
-    gc.style.width = Math.floor(FW * scale) + 'px';
-    gc.style.height = Math.floor(FH * scale) + 'px';
+    const maxW = wrap.clientWidth - 40, maxH = wrap.clientHeight - 40;
+    const scale = Math.min(maxW / A, maxH / A, 2.0);
+    gc.style.width = Math.floor(A * scale) + 'px';
+    gc.style.height = Math.floor(A * scale) + 'px';
   }
   resizeCanvas();
   window.addEventListener('resize', resizeCanvas);
-
-  // Load powerup images from repo
-  G.imgSpeed = new Image(); G.imgSpeed.src = 'power-up_speeds.png';
-  G.imgErase = new Image(); G.imgErase.src = 'power-up_erase.png';
 
   await autoLoadWeights();
   requestAnimationFrame(gameLoop);
