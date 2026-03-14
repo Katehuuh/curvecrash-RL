@@ -43,6 +43,7 @@ Input: 7ch ego-centric 128x128 (self/enemy trails, prev frame, speed/erase power
 - `train_selfplay.py` — PPO + PFSP self-play training loop
 - `experiments.py` — Model architectures (IMPALA-CNN, Voronoi wrapper)
 - `watch_agent_ffa.py` — Pygame viewer for local evaluation
+- `replay_pipeline.py` — Scrape replays, render to observations, produce BC data
 - `export_model.py` — Convert PyTorch checkpoint to TensorFlow.js
 - `CurveCrash-AI-v6.user.js` — Browser userscript for live play
 - `index.html` — Standalone browser demo (GitHub Pages)
