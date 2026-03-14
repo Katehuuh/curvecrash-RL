@@ -580,27 +580,38 @@ function checkCollision(x, y, pid) {
 // Age trail stamps: mark old trail as collidable for self
 function ageTrail(pid) {
   const p = G.players[pid];
-  // Stamps older than 15 trail points become self-collidable
   const ageThreshold = Math.max(0, p.trail.length - 15);
+  const oldVal = pid+100+1;
+  const hw = Math.ceil(TRAIL_HW * 0.5);
   for (let i = 0; i < ageThreshold; i++) {
     const t = p.trail[i];
-    const hw = Math.ceil(TRAIL_HW * 0.5);
     for (let dy=-hw; dy<=hw; dy++) for (let dx=-hw; dx<=hw; dx++) {
       if (dx*dx+dy*dy > hw*hw+1) continue;
       const cx=Math.round(t.x+dx), cy=Math.round(t.y+dy);
       if (cx>=0&&cx<FW&&cy>=0&&cy<FH && G.trailGrid[cy*FW+cx] === pid+1) {
-        G.trailGrid[cy*FW+cx] = pid+100+1; // mark as old (self-collidable)
+        G.trailGrid[cy*FW+cx] = oldVal;
       }
     }
   }
 }
 
-function stampTrail(x, y, pid) {
+function stampPoint(x, y, val) {
   const hw = Math.ceil(TRAIL_HW * 0.5);
   for (let dy=-hw; dy<=hw; dy++) for (let dx=-hw; dx<=hw; dx++) {
     if (dx*dx+dy*dy > hw*hw+1) continue;
     const cx=Math.round(x+dx), cy=Math.round(y+dy);
-    if (cx>=0&&cx<FW&&cy>=0&&cy<FH) G.trailGrid[cy*FW+cx] = pid+1;
+    if (cx>=0&&cx<FW&&cy>=0&&cy<FH) G.trailGrid[cy*FW+cx] = val;
+  }
+}
+
+function stampTrailLine(x0, y0, x1, y1, pid) {
+  // Interpolate between prev and current position to fill gaps at high speed
+  const dx = x1-x0, dy = y1-y0;
+  const dist = Math.sqrt(dx*dx+dy*dy);
+  const steps = Math.max(1, Math.ceil(dist / (TRAIL_HW * 0.8)));
+  for (let s=0; s<=steps; s++) {
+    const t = s/steps;
+    stampPoint(x0+dx*t, y0+dy*t, pid+1);
   }
 }
 
@@ -678,11 +689,15 @@ function physicsStep() {
       }
     }
 
-    // Stamp trail (if not in gap)
+    // Stamp trail (if not in gap) — interpolate to fill gaps at high speed
     if (!p.inGap) {
+      const px = p._prevDrawX ?? p.x, py = p._prevDrawY ?? p.y;
+      stampTrailLine(px, py, p.x, p.y, p.id);
       p.trail.push({x: p.x, y: p.y});
-      stampTrail(p.x, p.y, p.id);
       ageTrail(p.id);
+      p._prevDrawX = p.x; p._prevDrawY = p.y;
+    } else {
+      p._prevDrawX = p.x; p._prevDrawY = p.y;
     }
   }
 
