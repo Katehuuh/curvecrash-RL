@@ -6,10 +6,6 @@ RL bot for [CurveCrash](https://curvecrash.com) (Achtung die Kurve). PPO self-pl
 
 **Demo**: open the link above, arrow keys to steer. **Real site**: install [Tampermonkey](https://www.tampermonkey.net/), click the userscript badge, go to [curvecrash.com](https://curvecrash.com).
 
-## v8 — best model
-
-~65% WR self-play, beats random easily, loses to top-200 humans. IMPALA-CNN + CBAM + GRU(128), 2,344,934 params.
-
 ## Train your own
 
 ```bash
@@ -29,6 +25,7 @@ Requires Python 3.10+, PyTorch, NumPy, Pygame.
 
 | Version | Idea | Result |
 |---------|------|--------|
+| v8 | IMPALA-CNN + CBAM + GRU(128), 2.3M params | ~65% WR self-play. Beats random, loses to top-200 humans. |
 | v9 | Behavior cloning warmstart | Poisoned action distribution. PPO couldn't recover. |
 | v9.1 | Higher target_kl, fixed Voronoi | Plateaued at 25% WR |
 | v10 | Territory + proximity rewards, scalar obs | 72% peak then collapsed to 45% (reward annealing) |
