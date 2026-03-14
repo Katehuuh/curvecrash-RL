@@ -115,9 +115,10 @@ const MAX_STEPS = 3600;             // 60s at 60fps
 const WALL_T = 4;                   // wall thickness in field px
 
 // GS++ powerups
-const PUP_SPAWN_INT = 38;           // frames between spawns (match env powerup_spawn_interval)
-const PUP_RADIUS = 15;              // pickup radius in field px
-const PUP_SPEED_MULT = 1.5;         // speed multiplier when picked up
+const PUP_SPAWN_INT = 76;           // frames between spawns (match env powerup_spawn_interval=76)
+const PUP_VIS_RADIUS = 16 / SIM_SCALE; // visual radius in field px (~29px)
+const PUP_PICKUP_RADIUS = PUP_VIS_RADIUS + TRAIL_HW; // pickup = visual + trail half-width
+const PUP_SPEED_MULT = 2.0;         // speed multiplier per boost (multiplicative stacking)
 const PUP_SPEED_DUR = 4 * FPS;      // speed boost duration (frames)
 const PUP_FIRST_SPAWN = Math.round(3.5 * FPS); // first powerup at ~3.5s
 
@@ -477,7 +478,7 @@ function spawnPlayer(id, isHuman) {
     color: COLORS[id],
     trail: [],
     speed: SPEED,
-    speedBoostLeft: 0, // frames of speed boost remaining
+    speedBoosts: [], // [{expire: frameCount, mult: 2.0}, ...] — multiplicative stacking
     // Gap mechanics
     gapTimer: (GAP_INT_MIN + Math.random() * (GAP_INT_MAX - GAP_INT_MIN)) * FPS,
     inGap: false,
@@ -598,15 +599,16 @@ function physicsStep() {
       }
     }
 
-    if (action === 0) p.angle -= TURN_RATE;
-    else if (action === 2) p.angle += TURN_RATE;
+    // Turn rate scales with speed^(1/3) like the real game
+    const effTurnRate = TURN_RATE * Math.cbrt(speedMult);
+    if (action === 0) p.angle -= effTurnRate;
+    else if (action === 2) p.angle += effTurnRate;
 
-    // Speed boost tick
-    if (p.speedBoostLeft > 0) {
-      p.speed = SPEED * PUP_SPEED_MULT;
-      p.speedBoostLeft--;
-      if (p.speedBoostLeft <= 0) p.speed = SPEED;
-    }
+    // Speed boost: expire old, compute multiplicative stack
+    p.speedBoosts = p.speedBoosts.filter(b => b.expire > G.step);
+    let speedMult = 1.0;
+    for (const b of p.speedBoosts) speedMult *= b.mult;
+    p.speed = SPEED * speedMult;
 
     // Move
     const nx = p.x + Math.cos(p.angle) * p.speed;
@@ -626,8 +628,8 @@ function physicsStep() {
       }
     }
 
-    // Collision check (skip first 60 frames for spawn grace)
-    if (p.stepCount > 60 && checkCollision(nx, ny, p.id)) {
+    // Collision check (skip first 3s = 180 frames for spawn grace, matching env SPAWN_SECONDS=3.0)
+    if (p.stepCount > 180 && checkCollision(nx, ny, p.id)) {
       p.alive = false;
       continue;
     }
@@ -638,12 +640,11 @@ function physicsStep() {
     for (let pi = G.powerups.length - 1; pi >= 0; pi--) {
       const pup = G.powerups[pi];
       const dx = p.x - pup.x, dy = p.y - pup.y;
-      if (dx*dx + dy*dy < PUP_RADIUS * PUP_RADIUS) {
+      if (dx*dx + dy*dy < PUP_PICKUP_RADIUS * PUP_PICKUP_RADIUS) {
         if (pup.type === 'speed') {
-          p.speedBoostLeft = PUP_SPEED_DUR;
-          p.speed = SPEED * PUP_SPEED_MULT;
+          // Stack: add new boost (multiplicative with existing)
+          p.speedBoosts.push({ expire: G.step + PUP_SPEED_DUR, mult: PUP_SPEED_MULT });
         } else if (pup.type === 'erase') {
-          // Clear all trails
           G.trailGrid.fill(0);
           for (const pl of G.players) pl.trail = [];
         }
@@ -694,12 +695,12 @@ function render() {
   for (const pup of G.powerups) {
     const img = pup.type === 'speed' ? G.imgSpeed : G.imgErase;
     if (img && img.complete) {
-      const sz = PUP_RADIUS * 2.5;
+      const sz = PUP_VIS_RADIUS * 2;
       ctx.drawImage(img, pup.x - sz/2, pup.y - sz/2, sz, sz);
     } else {
       // Fallback circle
       ctx.beginPath();
-      ctx.arc(pup.x, pup.y, PUP_RADIUS, 0, Math.PI*2);
+      ctx.arc(pup.x, pup.y, PUP_VIS_RADIUS, 0, Math.PI*2);
       ctx.fillStyle = pup.type === 'speed' ? '#0f0' : '#44f';
       ctx.fill();
     }
