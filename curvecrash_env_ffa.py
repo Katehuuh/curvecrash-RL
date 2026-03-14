@@ -1324,14 +1324,31 @@ class CurveCrashFFAEnv(gym.Env):
     def get_live_opponent_count(self):
         return sum(1 for p in self.players[1:] if p.alive)
 
+    # Per-player colors for rendering (index by player.id)
+    PLAYER_COLORS = [
+        (255, 255, 255),  # 0: ego white
+        (255, 80, 80),    # 1: red
+        (80, 180, 255),   # 2: blue
+        (80, 255, 80),    # 3: green
+        (255, 200, 50),   # 4: yellow
+        (200, 80, 255),   # 5: purple
+        (255, 140, 50),   # 6: orange
+        (50, 255, 200),   # 7: cyan
+        (255, 100, 180),  # 8: pink
+        (180, 180, 100),  # 9: olive
+        (150, 150, 255),  # 10: lavender
+    ]
+
     def render(self):
         if self.render_mode != "rgb_array":
             return None
         img = np.zeros((ARENA_SIM, ARENA_SIM, 3), dtype=np.uint8)
-        ego_mask = self.trail_owner == self.ego.id
-        enemy_mask = (self.trail_owner > 0) & (~ego_mask)
-        img[ego_mask] = [255, 255, 255]
-        img[enemy_mask] = [128, 128, 128]
+
+        # Per-player colored trails
+        for player in self.players:
+            mask = self.trail_owner == player.id
+            ci = 0 if player.id == self.ego.id else min(player.id, len(self.PLAYER_COLORS) - 1)
+            img[mask] = self.PLAYER_COLORS[ci]
         w = self._wall_w
         if self.gspp:
             # Rectangular field walls
@@ -1372,4 +1389,26 @@ class CurveCrashFFAEnv(gym.Env):
                                     img[cy, cx] = [255, 255, 255]
                                 else:
                                     img[cy, cx] = [50, 100, 255]
+
+        # Player heads + direction lines
+        for player in self.players:
+            if not player.alive:
+                continue
+            ix, iy = int(round(player.x)), int(round(player.y))
+            ci = 0 if player.id == self.ego.id else min(player.id, len(self.PLAYER_COLORS) - 1)
+            head_color = self.PLAYER_COLORS[ci]
+            hr = max(2, int(self._trail_width / 2) + 1)
+            for dy in range(-hr, hr + 1):
+                for dx in range(-hr, hr + 1):
+                    if dx * dx + dy * dy <= hr * hr:
+                        cx, cy = ix + dx, iy + dy
+                        if 0 <= cx < ARENA_SIM and 0 <= cy < ARENA_SIM:
+                            img[cy, cx] = head_color
+            # Direction line
+            for t in range(1, 12):
+                lx = int(round(player.x + math.cos(player.angle) * t))
+                ly = int(round(player.y + math.sin(player.angle) * t))
+                if 0 <= lx < ARENA_SIM and 0 <= ly < ARENA_SIM:
+                    img[ly, lx] = [255, 255, 255]
+
         return img

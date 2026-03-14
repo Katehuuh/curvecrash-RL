@@ -580,6 +580,61 @@ def get_gru_hidden_size(state_dict):
     return 0
 
 
+def load_agent(checkpoint_path, device='cpu'):
+    """Load any checkpoint and return (agent, meta_dict).
+
+    Handles legacy (v4), v5, v5.1, v6, and IMPALA checkpoints.
+    Returns agent in eval mode + metadata dict with keys:
+        type, n_input_ch, gru_hidden, has_gru, has_scalars
+    """
+    from experiments import ImpalaCNNAgent
+
+    weights = torch.load(checkpoint_path, map_location=device, weights_only=True)
+    is_impala = any(k.startswith("conv.0.conv.") for k in weights)
+
+    if is_impala:
+        n_in = weights["conv.0.conv.weight"].shape[1]
+        gh = weights["gru.weight_hh_l0"].shape[1]
+        channels = []
+        for i in range(10):
+            k = f"conv.{i}.conv.weight"
+            if k in weights:
+                channels.append(weights[k].shape[0])
+        n_scalar = weights["scalar_fc.0.weight"].shape[1] if "scalar_fc.0.weight" in weights else 0
+        agent = ImpalaCNNAgent(
+            n_input_channels=n_in, gru_hidden=gh,
+            channels=tuple(channels),
+            use_cbam=any(k.startswith("cbam.") for k in weights),
+            n_scalar_inputs=n_scalar,
+        ).to(device)
+        agent.load_state_dict(weights)
+        agent.eval()
+        return agent, {
+            'type': 'impala', 'n_input_ch': n_in, 'gru_hidden': gh,
+            'has_gru': True, 'has_scalars': n_scalar > 0,
+        }
+
+    ct = detect_checkpoint_type(weights)
+    gh = get_gru_hidden_size(weights)
+    n_in = get_input_channels(weights)
+    has_gru = ct in ("v5", "v5_1", "v6")
+
+    if ct in ("v5_1", "v6"):
+        has_sa = any(k.startswith("spatial_attn.") for k in weights)
+        agent = Agent(use_spatial_attn=has_sa, n_input_channels=n_in).to(device)
+    elif ct == "v5":
+        agent = V5Agent().to(device)
+    else:
+        agent = LegacyAgent().to(device)
+
+    agent.load_state_dict(weights)
+    agent.eval()
+    return agent, {
+        'type': ct, 'n_input_ch': n_in, 'gru_hidden': gh,
+        'has_gru': has_gru, 'has_scalars': False,
+    }
+
+
 class SelfPlayVecEnv:
     """Sync vector env with batched GPU opponent inference and GRU state tracking.
     v9: supports multiple opponent model slots for per-env opponent diversity."""
