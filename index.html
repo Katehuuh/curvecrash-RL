@@ -328,16 +328,26 @@ function aiInfer(obsNhwc) {
 }
 
 // ======================== OBSERVATION BUILDING ========================
-function rotCh(ch, hx, hy, hdg, fill) {
-  const N = OBS, half = N/2, cos = Math.cos(hdg), sin = Math.sin(hdg);
-  const out = new Float32Array(N*N);
+// Precomputed rotation index map — built once per obs, reused for all 7 channels
+function buildRotMap(hx, hy, hdg) {
+  const N=OBS, half=N/2, cos=Math.cos(hdg), sin=Math.sin(hdg);
+  const map = new Int32Array(N*N);
   for (let r=0; r<N; r++) { const dy=r-half+.5;
     for (let c=0; c<N; c++) { const dx=c-half+.5;
-      const sc=Math.round(hx+cos*dx-sin*dy), sr=Math.round(hy+sin*dx+cos*dy);
-      out[r*N+c] = (sc>=0&&sc<N&&sr>=0&&sr<N) ? ch[sr*N+sc] : fill;
+      const sc=(hx+cos*dx-sin*dy+.5)|0, sr=(hy+sin*dx+cos*dy+.5)|0;
+      map[r*N+c] = (sc>=0&&sc<N&&sr>=0&&sr<N) ? sr*N+sc : -1;
     }
   }
+  return map;
+}
+function rotChMap(ch, map, fill) {
+  const out = new Float32Array(OBS*OBS);
+  for (let i=0; i<OBS*OBS; i++) { const j=map[i]; out[i]=j>=0?ch[j]:fill; }
   return out;
+}
+// Fallback for cases without precomputed map
+function rotCh(ch, hx, hy, hdg, fill) {
+  return rotChMap(ch, buildRotMap(hx, hy, hdg), fill);
 }
 
 function buildTrailGrids(pid) {
@@ -426,10 +436,13 @@ function buildAIObs(pid) {
   const me = G.players.find(p=>p.id===pid);
   if (!me) return null;
   const hx=me.x*OBS_SCALE, hy=me.y*OBS_SCALE+OBS_OFF_Y, hdg=me.angle;
-  const rS=rotCh(selfCh,hx,hy,hdg,1), rE=rotCh(enemyCh,hx,hy,hdg,0);
+
+  // Build rotation map ONCE, reuse for all 7 channels
+  const rmap = buildRotMap(hx, hy, hdg);
+  const rS=rotChMap(selfCh,rmap,1), rE=rotChMap(enemyCh,rmap,0);
   let rPS, rPE;
-  if (me.prevSelf) { rPS=rotCh(me.prevSelf,hx,hy,hdg,1); rPE=rotCh(me.prevEnemy,hx,hy,hdg,0); }
-  else { const z=new Float32Array(OBS*OBS); rPS=rotCh(z,hx,hy,hdg,1); rPE=rotCh(z,hx,hy,hdg,0); }
+  if (me.prevSelf) { rPS=rotChMap(me.prevSelf,rmap,1); rPE=rotChMap(me.prevEnemy,rmap,0); }
+  else { const z=new Float32Array(OBS*OBS); rPS=rotChMap(z,rmap,1); rPE=rotChMap(z,rmap,0); }
   // Powerup channels
   const N = OBS, NN = N*N;
   const spdCh = new Float32Array(NN), ersCh = new Float32Array(NN);
@@ -441,18 +454,20 @@ function buildAIObs(pid) {
       if (dx*dx+dy*dy<=pupR*pupR) { const cx=px+dx, cy=py+dy; if(cx>=0&&cx<N&&cy>=0&&cy<N) ch[cy*N+cx]=1; }
     }
   }
-  const rSpd = rotCh(spdCh, hx, hy, hdg, 0), rErs = rotCh(ersCh, hx, hy, hdg, 0);
+  const rSpd = rotChMap(spdCh,rmap,0), rErs = rotChMap(ersCh,rmap,0);
   // Voronoi
   const nCh = G.model ? G.model.nCh : 7;
   const obs = new Float32Array(NN * nCh);
   let rV = null;
-  if (nCh >= 7) rV = rotCh(computeVoronoi(selfCh, enemyCh, pid), hx, hy, hdg, 0);
+  if (nCh >= 7) rV = rotChMap(computeVoronoi(selfCh, enemyCh, pid), rmap, 0);
   for (let i=0; i<NN; i++) {
     obs[i*nCh+0]=rS[i]; obs[i*nCh+1]=rE[i]; obs[i*nCh+2]=rPS[i]; obs[i*nCh+3]=rPE[i];
     obs[i*nCh+4]=rSpd[i]; obs[i*nCh+5]=rErs[i];
     if (nCh>=7) obs[i*nCh+6]=rV[i];
   }
+  // Cache for viz + next frame
   me.prevSelf = selfCh; me.prevEnemy = enemyCh;
+  G._vizSelf = selfCh; G._vizEnemy = enemyCh;
   return obs;
 }
 
@@ -756,17 +771,18 @@ function render() {
     statusBar.textContent = '';
   }
 
-  // AI viz
-  if (G.running && G.players[0]) {
-    const {self: s, enemy: e} = buildTrailGrids(G.players.find(p=>!p.isHuman)?.id || 1);
-    const id = vizCtx.createImageData(OBS,OBS);
+  // AI viz — reuse cached grids from buildAIObs (no rebuild)
+  if (G.running && G._vizSelf) {
+    if (!G._vizImgData) G._vizImgData = vizCtx.createImageData(OBS,OBS);
+    const id = G._vizImgData;
+    const s = G._vizSelf, e = G._vizEnemy;
     for (let i=0;i<OBS*OBS;i++) { id.data[i*4]=e[i]*255; id.data[i*4+1]=s[i]*200; id.data[i*4+2]=0; id.data[i*4+3]=255; }
     vizCtx.putImageData(id,0,0);
   }
 
-  // Perf info
-  const pi = document.getElementById('perf-info');
-  if (G.model) {
+  // Perf info (throttle DOM updates)
+  if (G.step % 15 === 0 && G.model) {
+    const pi = document.getElementById('perf-info');
     pi.innerHTML = `<span class="label">Infer:</span> <span class="${G.inferAvg>80?'val-bad':G.inferAvg>40?'val-warn':'val'}">${G.inferMs.toFixed(0)}ms</span> <span class="label">avg</span> <span class="val">${G.inferAvg.toFixed(0)}ms</span> | <span class="val">${G.inferAvg>0?(1000/G.inferAvg).toFixed(0):'?'} fps</span>`;
   }
 }
