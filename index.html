@@ -114,15 +114,7 @@ const GAP_DUR = 0.159;              // gap duration seconds (GS++ uses fixed dis
 const MAX_STEPS = 3600;             // 60s at 60fps
 const WALL_T = 4;                   // wall thickness in field px
 
-// GS++ powerups
-const PUP_SPAWN_INT = 76;           // frames between spawns (match env powerup_spawn_interval=76)
-const PUP_VIS_RADIUS = 16 / SIM_SCALE; // visual radius in field px (~29px)
-const PUP_PICKUP_RADIUS = PUP_VIS_RADIUS + TRAIL_HW; // pickup = visual + trail half-width
-const PUP_SPEED_MULT = 2.0;         // speed multiplier per boost (multiplicative stacking)
-const PUP_SPEED_DUR = 4 * FPS;      // speed boost duration (frames)
-const PUP_FIRST_SPAWN = Math.round(3.5 * FPS); // first powerup at ~3.5s
-
-// Observation constants (match env)
+// Observation constants (match env) — must be before powerup constants
 const OBS = 128;
 const SIM = 512;
 const SIM_SCALE = SIM / FW;
@@ -131,6 +123,14 @@ const OBS_SCALE = SIM_SCALE / DS;
 const ARENA_H = Math.round(FH * SIM_SCALE);
 const OFF_Y = Math.floor((SIM - ARENA_H) / 2);
 const OBS_OFF_Y = OFF_Y / DS;
+
+// GS++ powerups (after SIM_SCALE is defined)
+const PUP_SPAWN_INT = 76;           // frames between spawns (match env powerup_spawn_interval=76)
+const PUP_VIS_RADIUS = 16 / SIM_SCALE; // visual radius in field px (~29px)
+const PUP_PICKUP_RADIUS = PUP_VIS_RADIUS + TRAIL_HW; // pickup = visual + trail half-width
+const PUP_SPEED_MULT = 2.0;         // speed multiplier per boost (multiplicative stacking)
+const PUP_SPEED_DUR = 4 * FPS;      // speed boost duration (frames)
+const PUP_FIRST_SPAWN = Math.round(3.5 * FPS); // first powerup at ~3.5s
 
 // ======================== GAME STATE ========================
 const G = {
@@ -143,8 +143,6 @@ const G = {
   // AI state
   model: null,
   gruTensor: null,
-  prevSelf: null,
-  prevEnemy: null,
   inferMs: 0,
   inferAvg: 0,
   // Trail grid for collision (field resolution)
@@ -430,7 +428,7 @@ function buildAIObs(pid) {
   const hx=me.x*OBS_SCALE, hy=me.y*OBS_SCALE+OBS_OFF_Y, hdg=me.angle;
   const rS=rotCh(selfCh,hx,hy,hdg,1), rE=rotCh(enemyCh,hx,hy,hdg,0);
   let rPS, rPE;
-  if (G.prevSelf) { rPS=rotCh(G.prevSelf,hx,hy,hdg,1); rPE=rotCh(G.prevEnemy,hx,hy,hdg,0); }
+  if (me.prevSelf) { rPS=rotCh(me.prevSelf,hx,hy,hdg,1); rPE=rotCh(me.prevEnemy,hx,hy,hdg,0); }
   else { const z=new Float32Array(OBS*OBS); rPS=rotCh(z,hx,hy,hdg,1); rPE=rotCh(z,hx,hy,hdg,0); }
   // Powerup channels
   const N = OBS, NN = N*N;
@@ -454,7 +452,7 @@ function buildAIObs(pid) {
     obs[i*nCh+4]=rSpd[i]; obs[i*nCh+5]=rErs[i];
     if (nCh>=7) obs[i*nCh+6]=rV[i];
   }
-  G.prevSelf = selfCh; G.prevEnemy = enemyCh;
+  me.prevSelf = selfCh; me.prevEnemy = enemyCh;
   return obs;
 }
 
@@ -479,6 +477,8 @@ function spawnPlayer(id, isHuman) {
     trail: [],
     speed: SPEED,
     speedBoosts: [], // [{expire: frameCount, mult: 2.0}, ...] — multiplicative stacking
+    prevSelf: null,  // per-player previous frame channels for AI obs
+    prevEnemy: null,
     // Gap mechanics
     gapTimer: (GAP_INT_MIN + Math.random() * (GAP_INT_MAX - GAP_INT_MIN)) * FPS,
     inGap: false,
@@ -548,25 +548,36 @@ function updateScoreUI() {
 function checkCollision(x, y, pid) {
   // Wall collision — field boundary with thickness
   if (x < WALL_T || x >= FW - WALL_T || y < WALL_T || y >= FH - WALL_T) return true;
-  // Trail collision
+  // Trail collision — check grid cells in a small radius around player
   const hw = Math.ceil(TRAIL_HW * 0.5);
-  const p = G.players[pid];
-  const safeHead = Math.max(0, p.trail.length - 10); // ignore last 10 trail points (own head)
   for (let dy=-hw; dy<=hw; dy++) for (let dx=-hw; dx<=hw; dx++) {
     const cx = Math.round(x+dx), cy = Math.round(y+dy);
     if (cx<0||cx>=FW||cy<0||cy>=FH) return true;
     const gv = G.trailGrid[cy*FW+cx];
-    if (gv > 0 && gv !== pid+1) return true; // enemy trail
-    if (gv === pid+1) {
-      // Self-collision: only collide with old trail, not recent head stamps
-      // Check if any of our old trail points are at this grid cell
-      for (let ti = 0; ti < safeHead; ti++) {
-        const tp = p.trail[ti];
-        if (Math.abs(tp.x - cx) < 2 && Math.abs(tp.y - cy) < 2) return true;
+    if (gv > 0 && gv !== pid+1) return true; // enemy trail = death
+    // Self-collision: use a separate "old trail" grid value
+    // Grid stores pid+1 for recent trail, pid+100 for old trail
+    if (gv === pid+100+1) return true;
+  }
+  return false;
+}
+
+// Age trail stamps: mark old trail as collidable for self
+function ageTrail(pid) {
+  const p = G.players[pid];
+  // Stamps older than 15 trail points become self-collidable
+  const ageThreshold = Math.max(0, p.trail.length - 15);
+  for (let i = 0; i < ageThreshold; i++) {
+    const t = p.trail[i];
+    const hw = Math.ceil(TRAIL_HW * 0.5);
+    for (let dy=-hw; dy<=hw; dy++) for (let dx=-hw; dx<=hw; dx++) {
+      if (dx*dx+dy*dy > hw*hw+1) continue;
+      const cx=Math.round(t.x+dx), cy=Math.round(t.y+dy);
+      if (cx>=0&&cx<FW&&cy>=0&&cy<FH && G.trailGrid[cy*FW+cx] === pid+1) {
+        G.trailGrid[cy*FW+cx] = pid+100+1; // mark as old (self-collidable)
       }
     }
   }
-  return false;
 }
 
 function stampTrail(x, y, pid) {
@@ -656,6 +667,7 @@ function physicsStep() {
     if (!p.inGap) {
       p.trail.push({x: p.x, y: p.y});
       stampTrail(p.x, p.y, p.id);
+      ageTrail(p.id);
     }
   }
 
