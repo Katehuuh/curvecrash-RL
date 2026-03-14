@@ -777,12 +777,28 @@ function render() {
     }
   }
 
-  // Draw trails
+  // Draw trails as connected lines
+  const tw = Math.ceil(TRAIL_W * 0.5);
   for (const p of G.players) {
-    ctx.fillStyle = p.color.hex;
-    for (const t of p.trail) {
-      ctx.fillRect(Math.round(t.x - TRAIL_HW*.5), Math.round(t.y - TRAIL_HW*.5), Math.ceil(TRAIL_W*.5), Math.ceil(TRAIL_W*.5));
+    if (p.trail.length === 0) continue;
+    ctx.strokeStyle = p.color.hex;
+    ctx.lineWidth = tw;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.beginPath();
+    ctx.moveTo(p.trail[0].x, p.trail[0].y);
+    for (let i = 1; i < p.trail.length; i++) {
+      // Break the line at gap jumps (distance > 2x normal step)
+      const dx = p.trail[i].x - p.trail[i-1].x, dy = p.trail[i].y - p.trail[i-1].y;
+      if (dx*dx + dy*dy > SPEED * SPEED * 16) {
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(p.trail[i].x, p.trail[i].y);
+      } else {
+        ctx.lineTo(p.trail[i].x, p.trail[i].y);
+      }
     }
+    ctx.stroke();
   }
 
   // Draw heads
