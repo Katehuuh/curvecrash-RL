@@ -39,10 +39,10 @@ Input: 7ch ego-centric 128x128 (self/enemy trails, prev frame, speed/erase power
 
 ## Files
 
-- `curvecrash_env_ffa.py` — Gym environment (512x512 arena, FFA, powerups)
+- `curvecrash_env_ffa.py` — module, Gym environment (512x512 arena, FFA, powerups)
 - `train_selfplay.py` — PPO + PFSP self-play training loop
 - `experiments.py` — Model architectures (IMPALA-CNN, Voronoi wrapper)
-- `watch_agent_ffa.py` — Pygame viewer for local evaluation
+- `watch_agent_ffa.py` — UI only, Pygame viewer for local evaluation
 - `replay_pipeline.py` — Scrape replays, render to observations, produce BC data
 - `export_model.py` — Convert PyTorch checkpoint to TensorFlow.js
 - `CurveCrash-AI-v6.user.js` — Browser userscript for live play
