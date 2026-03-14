@@ -142,7 +142,6 @@ const G = {
   scores: { human: 0, ai: 0, draw: 0, round: 0 },
   // AI state
   model: null,
-  gruTensor: null,
   inferMs: 0,
   inferAvg: 0,
   // Trail grid for collision (field resolution)
@@ -277,7 +276,7 @@ function buildTFModel(json) {
   return m;
 }
 
-function aiInfer(obsNhwc) {
+function aiInfer(obsNhwc, player) {
   if (!G.model) return 1;
   const t0 = performance.now();
   const m = G.model;
@@ -309,7 +308,7 @@ function aiInfer(obsNhwc) {
     }
     x = tf.relu(tf.matMul(x.reshape([1,-1]),m.fc.w).add(m.fc.b));
     if (m.hasGRU) {
-      const h = G.gruTensor || tf.zeros([1,m.gruH]);
+      const h = player.gruTensor || tf.zeros([1,m.gruH]);
       const rg=m.gru.reset, zg=m.gru.update, ng=m.gru.new;
       const r=tf.sigmoid(tf.matMul(x,rg.Wi).add(rg.bi).add(tf.matMul(h,rg.Wh).add(rg.bh)));
       const z=tf.sigmoid(tf.matMul(x,zg.Wi).add(zg.bi).add(tf.matMul(h,zg.Wh).add(zg.bh)));
@@ -320,7 +319,7 @@ function aiInfer(obsNhwc) {
     const l = tf.matMul(x,m.actor.w).add(m.actor.b).dataSync();
     return l[0]>=l[1]&&l[0]>=l[2] ? 0 : l[2]>=l[1] ? 2 : 1;
   });
-  if (newGru) { if (G.gruTensor) G.gruTensor.dispose(); G.gruTensor = newGru; }
+  if (newGru) { if (player.gruTensor) player.gruTensor.dispose(); player.gruTensor = newGru; }
   const ms = performance.now() - t0;
   G.inferMs = ms;
   G.inferAvg = G.inferAvg > 0 ? G.inferAvg * 0.9 + ms * 0.1 : ms;
@@ -503,6 +502,7 @@ function spawnPlayer(id, isHuman) {
     spawning: true,  // true during 3s grace period — no trail, no gaps, no collision
     prevSelf: null,  // per-player previous frame channels for AI obs
     prevEnemy: null,
+    gruTensor: null, // per-player GRU hidden state (tf.keep'd)
     // Gap mechanics
     gapTimer: (GAP_INT_MIN + Math.random() * (GAP_INT_MAX - GAP_INT_MIN)) * FPS,
     inGap: false,
@@ -516,7 +516,8 @@ function startRound() {
   G.step = 0;
   G.prevSelf = null;
   G.prevEnemy = null;
-  if (G.gruTensor) { G.gruTensor.dispose(); G.gruTensor = null; }
+  // Dispose per-player GRU tensors
+  for (const p of G.players) { if (p.gruTensor) { p.gruTensor.dispose(); p.gruTensor = null; } }
   G.trailGrid = new Uint8Array(FW * FH);
   G.powerups = [];
   G.pupIdCounter = 0;
@@ -638,7 +639,7 @@ function physicsStep() {
       // AI decision every 3 frames (FRAME_SKIP=3)
       if (G.model && p.stepCount % 3 === 0) {
         const obs = buildAIObs(p.id);
-        if (obs) action = aiInfer(obs);
+        if (obs) action = aiInfer(obs, p);
         p._lastAction = action;
       } else {
         action = p._lastAction || 1;
