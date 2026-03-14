@@ -111,7 +111,7 @@ const TRAIL_HW = TRAIL_W / 2;
 const GAP_LEN = 22.4;               // gap length in field px
 const GAP_INT_MIN = 1.1, GAP_INT_MAX = 2.0; // seconds between gaps
 const GAP_DUR = 0.159;              // gap duration seconds (GS++ uses fixed distance, approximate with time)
-const MAX_STEPS = 3600;             // 60s at 60fps
+const MAX_STEPS = 10800;            // 3600 agent steps * FRAME_SKIP=3 = 180s
 const WALL_T = 4;                   // wall thickness in field px
 
 // Observation constants (match env) — must be before powerup constants
@@ -482,9 +482,17 @@ const COLORS = [
 ];
 
 function spawnPlayer(id, isHuman) {
-  const margin = WALL_T + 40;
-  const x = margin + Math.random() * (FW - 2*margin);
-  const y = margin + Math.random() * (FH - 2*margin);
+  const margin = Math.round(FW * 0.15); // ~138 field px, matching env
+  const minDist = Math.round(FW * 0.08); // ~74 field px min spacing
+  let x, y, attempts = 0;
+  do {
+    x = margin + Math.random() * (FW - 2*margin);
+    y = margin + Math.random() * (FH - 2*margin);
+    attempts++;
+  } while (attempts < 50 && G.players.some(p => {
+    const dx = p.x-x, dy = p.y-y;
+    return dx*dx+dy*dy < minDist*minDist;
+  }));
   const angle = Math.random() * Math.PI * 2;
   return {
     id, x, y, angle, alive: true, isHuman,
@@ -492,6 +500,7 @@ function spawnPlayer(id, isHuman) {
     trail: [],
     speed: SPEED,
     speedBoosts: [], // [{expire: frameCount, mult: 2.0}, ...] — multiplicative stacking
+    spawning: true,  // true during 3s grace period — no trail, no gaps, no collision
     prevSelf: null,  // per-player previous frame channels for AI obs
     prevEnemy: null,
     // Gap mechanics
@@ -651,7 +660,19 @@ function physicsStep() {
     const nx = p.x + Math.cos(p.angle) * p.speed;
     const ny = p.y + Math.sin(p.angle) * p.speed;
 
-    // Gap mechanics
+    // End spawning after 3s grace
+    if (p.spawning && p.stepCount > 180) {
+      p.spawning = false;
+      p._prevDrawX = p.x; p._prevDrawY = p.y;
+    }
+
+    // Move
+    p.x = nx; p.y = ny;
+
+    // During spawning: just move, no collision/trail/gaps/pickup
+    if (p.spawning) continue;
+
+    // Gap mechanics (only after spawning ends)
     p.gapTimer--;
     if (!p.inGap && p.gapTimer <= 0) {
       p.inGap = true;
@@ -659,27 +680,35 @@ function physicsStep() {
     }
     if (p.inGap) {
       p.gapDist += p.speed;
-      if (p.gapDist >= GAP_LEN) {
+      if (p.gapDist >= GAP_LEN * (1.0 + (Math.random() - 0.5) * 0.032)) {
         p.inGap = false;
         p.gapTimer = (GAP_INT_MIN + Math.random() * (GAP_INT_MAX - GAP_INT_MIN)) * FPS;
       }
     }
 
-    // Collision check (skip first 3s = 180 frames for spawn grace, matching env SPAWN_SECONDS=3.0)
-    if (p.stepCount > 180 && checkCollision(nx, ny, p.id)) {
-      p.alive = false;
-      continue;
+    // Swept collision: check along the path from prev to current
+    const prevX = p._prevMoveX ?? p.x, prevY = p._prevMoveY ?? p.y;
+    const mdx = p.x - prevX, mdy = p.y - prevY;
+    const mdist = Math.sqrt(mdx*mdx + mdy*mdy);
+    let hit = false;
+    if (mdist > 1) {
+      const csteps = Math.ceil(mdist);
+      for (let cs = 1; cs <= csteps; cs++) {
+        const t = cs / csteps;
+        if (checkCollision(prevX + mdx*t, prevY + mdy*t, p.id)) { hit = true; break; }
+      }
+    } else {
+      hit = checkCollision(p.x, p.y, p.id);
     }
+    p._prevMoveX = p.x; p._prevMoveY = p.y;
+    if (hit) { p.alive = false; continue; }
 
-    p.x = nx; p.y = ny;
-
-    // Powerup pickup
+    // Powerup pickup (not during spawning)
     for (let pi = G.powerups.length - 1; pi >= 0; pi--) {
       const pup = G.powerups[pi];
-      const dx = p.x - pup.x, dy = p.y - pup.y;
-      if (dx*dx + dy*dy < PUP_PICKUP_RADIUS * PUP_PICKUP_RADIUS) {
+      const pdx = p.x - pup.x, pdy = p.y - pup.y;
+      if (pdx*pdx + pdy*pdy < PUP_PICKUP_RADIUS * PUP_PICKUP_RADIUS) {
         if (pup.type === 'speed') {
-          // Stack: add new boost (multiplicative with existing)
           p.speedBoosts.push({ expire: G.step + PUP_SPEED_DUR, mult: PUP_SPEED_MULT });
         } else if (pup.type === 'erase') {
           G.trailGrid.fill(0);
@@ -704,10 +733,10 @@ function physicsStep() {
   // Spawn powerups
   G.pupSpawnTimer--;
   if (G.pupSpawnTimer <= 0) {
-    const margin = WALL_T + 30;
+    const margin = Math.round(PUP_VIS_RADIUS * 2); // ~58 field px, matching env
     const px = margin + Math.random() * (FW - 2*margin);
     const py = margin + Math.random() * (FH - 2*margin);
-    const type = Math.random() < 0.6 ? 'speed' : 'erase';
+    const type = Math.random() < 2/3 ? 'speed' : 'erase'; // env: speed_weight=2, erase_weight=1
     G.powerups.push({ x: px, y: py, type, id: G.pupIdCounter++ });
     G.pupSpawnTimer = PUP_SPAWN_INT;
   }
