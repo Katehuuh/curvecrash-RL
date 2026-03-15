@@ -2,7 +2,7 @@
 
 curvecrash-RL is a reinforcement learning bot for experimentation on the [CurveCrash](https://curvecrash.com) environment (Achtung die Kurve), using PPO self-play and transfer learning, playable in browser. A 2.3M param CNN+GRU (IMPALA-CNN + Voronoi) with 3 discrete actions learns survival but not strategy. Breaking through probably needs a bigger model, continuous actions, or a different training algorithm.
 
-**Demo**: open the link above, arrow keys to steer. **·** **Real site**: install [Tampermonkey](https://www.tampermonkey.net/), click the userscript badge, go to [curvecrash.com](https://curvecrash.com).
+**Demo**: open the link above, arrow keys to steer. **·** **Real site**: install [Tampermonkey](https://www.tampermonkey.net/), click the userscript badge, go to [curvecrash.com](https://curvecrash.com) and load `/models/v8.json`.
 
 ## Train your own
 
