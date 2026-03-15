@@ -147,10 +147,23 @@ const G = {
   running: false, players: [], step: 0, maxPlayers: 2, gameSpeed: 1,
   scores: { human: 0, ai: 0, draw: 0, round: 0 },
   model: null, inferMs: 0, inferAvg: 0,
-  trailOwner: null,  // Int16Array(512*512) — player ID (1-indexed), 0=empty
-  trailFrame: null,  // Int32Array(512*512) — frame when pixel was drawn
+  trailOwner: new Int16Array(A*A),
+  trailFrame: new Int32Array(A*A),
   powerups: [], pupIdCounter: 0, pupSpawnTimer: 0,
 };
+
+// Pre-allocated buffers to avoid per-frame GC pressure
+const _rotMap = new Int32Array(OBS*OBS);
+const _rotBufs = Array.from({length:8}, () => new Float32Array(OBS*OBS));
+let _rotBufIdx = 0;
+const _selfDs = new Float32Array(OBS*OBS);
+const _enemyDs = new Float32Array(OBS*OBS);
+const _spdCh = new Float32Array(OBS*OBS);
+const _ersCh = new Float32Array(OBS*OBS);
+const _blocked = new Uint8Array(OBS*OBS);
+const _territory = new Uint8Array(OBS*OBS);
+const _obsNhwc = new Float32Array(OBS*OBS*7);
+const _vorBuf = new Float32Array(OBS*OBS);
 
 // ======================== CANVAS ========================
 const gc = document.getElementById('game');
@@ -295,17 +308,16 @@ function aiInfer(obsNhwc, player) {
 // ======================== OBSERVATION (matches env exactly) ========================
 function buildRotMap(hx, hy, hdg) {
   const N=OBS, half=N/2, cos=Math.cos(hdg), sin=Math.sin(hdg);
-  const map = new Int32Array(N*N);
   for (let r=0; r<N; r++) { const dy=r-half+.5;
     for (let c=0; c<N; c++) { const dx=c-half+.5;
       const sc=(hx+cos*dx-sin*dy+.5)|0, sr=(hy+sin*dx+cos*dy+.5)|0;
-      map[r*N+c] = (sc>=0&&sc<N&&sr>=0&&sr<N) ? sr*N+sc : -1;
+      _rotMap[r*N+c] = (sc>=0&&sc<N&&sr>=0&&sr<N) ? sr*N+sc : -1;
     }
   }
-  return map;
+  return _rotMap;
 }
 function rotChMap(ch, map, fill) {
-  const out = new Float32Array(OBS*OBS);
+  const out = _rotBufs[_rotBufIdx++ & 7]; // cycle through 8 pre-allocated buffers
   for (let i=0; i<OBS*OBS; i++) { const j=map[i]; out[i]=j>=0?ch[j]:fill; }
   return out;
 }
@@ -313,7 +325,9 @@ function rotChMap(ch, map, fill) {
 function buildObs(pid) {
   // Step 1: bool masks at 512x512 from trailOwner
   const AA = A*A, N = OBS, NN = N*N;
-  const selfDs = new Float32Array(NN), enemyDs = new Float32Array(NN);
+  _rotBufIdx = 0; // reset rotation buffer pool
+  _selfDs.fill(0); _enemyDs.fill(0);
+  const selfDs = _selfDs, enemyDs = _enemyDs;
 
   // Step 2: downsample 512→128 with .any() over 4x4 blocks
   for (let or = 0; or < N; or++) {
@@ -351,7 +365,8 @@ function buildObs(pid) {
   }
 
   // Step 5: powerup grids at obs res
-  const spdCh = new Float32Array(NN), ersCh = new Float32Array(NN);
+  _spdCh.fill(0); _ersCh.fill(0);
+  const spdCh = _spdCh, ersCh = _ersCh;
   const pupRds = Math.max(1, Math.round(PUP_RADIUS / DS)); // 4
   for (const pup of G.powerups) {
     const px = Math.round(pup.x / DS), py = Math.round(pup.y / DS);
@@ -377,7 +392,8 @@ function buildObs(pid) {
   let rV = null;
   if (nCh >= 7) {
     // BFS at obs resolution
-    const blocked = new Uint8Array(NN), territory = new Uint8Array(NN);
+    _blocked.fill(0); _territory.fill(0);
+    const blocked = _blocked, territory = _territory;
     for (let i = 0; i < NN; i++) if (selfDs[i] > .5 || enemyDs[i] > .5) blocked[i] = 1;
     const ehx = Math.round(hx), ehy = Math.round(hy), ei = ehy*N+ehx;
     let egoQ = [], enemyQ = [];
@@ -404,13 +420,13 @@ function buildObs(pid) {
       }
       egoQ = nE; enemyQ = nX;
     }
-    const vor = new Float32Array(NN);
+    _vorBuf.fill(0); const vor = _vorBuf;
     for (let i = 0; i < NN; i++) if (territory[i] === 1) vor[i] = 1;
     rV = rotChMap(vor, rmap, 0);
   }
 
   // Step 8: stack NHWC
-  const obs = new Float32Array(NN * nCh);
+  const obs = _obsNhwc;
   for (let i = 0; i < NN; i++) {
     obs[i*nCh] = rS[i]; obs[i*nCh+1] = rE[i]; obs[i*nCh+2] = rPS[i]; obs[i*nCh+3] = rPE[i];
     obs[i*nCh+4] = rSpd[i]; obs[i*nCh+5] = rErs[i];
@@ -522,8 +538,8 @@ function spawnPlayer(id, isHuman) {
 function startRound() {
   for (const p of G.players) if (p.gruTensor) { p.gruTensor.dispose(); }
   G.players = []; G.step = 0;
-  G.trailOwner = new Int16Array(A*A);
-  G.trailFrame = new Int32Array(A*A);
+  G.trailOwner.fill(0);
+  G.trailFrame.fill(0);
   G.powerups = []; G.pupIdCounter = 0; G.pupSpawnTimer = PUP_FIRST_SPAWN;
   G.players.push(spawnPlayer(0, true));
   for (let i = 1; i < G.maxPlayers; i++) G.players.push(spawnPlayer(i, false));
@@ -651,17 +667,20 @@ function physicsStep() {
   }
 
   G.step++;
-  const alive = G.players.filter(p => p.alive);
-  if (alive.length <= 1 || G.step >= MAX_STEPS) endRound('end');
+  let aliveCount = 0;
+  for (const p of G.players) if (p.alive) aliveCount++;
+  if (aliveCount <= 1 || G.step >= MAX_STEPS) endRound('end');
 }
 
 // ======================== RENDERING ========================
 function render() {
   // Build 512x512 RGB from trailOwner
-  const imgData = offCtx.createImageData(A, A);
+  if (!G._renderImg) G._renderImg = offCtx.createImageData(A, A);
+  const imgData = G._renderImg;
   const d = imgData.data;
-  // Background
-  for (let i = 0; i < A*A; i++) { d[i*4+3] = 255; d[i*4] = 13; d[i*4+1] = 13; d[i*4+2] = 24; }
+  // Background — fast fill via Uint32Array view
+  const d32 = new Uint32Array(d.buffer);
+  d32.fill(0xFF180D0D); // ABGR for rgba(13,13,24,255)
   // Walls (GS++ top/bottom bands)
   const ww = Math.max(1, Math.ceil(WM));
   for (let y = 0; y < OFF_Y + ww; y++) for (let x = 0; x < A; x++) { const i=(y*A+x)*4; d[i]=42;d[i+1]=42;d[i+2]=62; }
