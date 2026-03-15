@@ -12,7 +12,19 @@ python train_selfplay.py --arch impala --voronoi --gspp --num-envs 8 --total-tim
 python watch_agent_ffa.py --checkpoint checkpoints/agent_final.pt --gspp
 ```
 
-## What failed
+## Files
+
+- `curvecrash_env_ffa.py` — module, Gym environment (512x512 arena, FFA, powerups)
+- `train_selfplay.py` — PPO + PFSP self-play training loop
+- `experiments.py` — Model architectures (IMPALA-CNN, Voronoi wrapper)
+- `watch_agent_ffa.py` — UI only, Pygame viewer for local evaluation
+- `replay_pipeline.py` — Scrape replays, render to observations, produce BC data
+- `export_model.py` — Convert PyTorch checkpoint to TensorFlow.js
+- `CurveCrash-AI-v6.user.js` — Browser userscript for live play
+- `index.html` — Standalone browser demo (GitHub Pages)
+
+<details>
+<summary>What failed</summary>
 
 | Version | Idea | Result |
 |---------|------|--------|
@@ -30,7 +42,7 @@ python watch_agent_ffa.py --checkpoint checkpoints/agent_final.pt --gspp
 | Safety shield | Inference-time tree search | 3-action, 5px/step. Can't differentiate. |
 | BC-only | Supervised learning from 879K human frames | 73% accuracy, drives straight into walls. |
 
-## What about the replay data?
+### What about the replay data?
 
 `replay_pipeline.py` scrapes elite human games (ELO 1600-2200) from curvecrash.com and renders 879K (obs, action) frames. We tried using this data three ways — all failed:
 
@@ -44,7 +56,7 @@ python watch_agent_ffa.py --checkpoint checkpoints/agent_final.pt --gspp
 
 The replay data itself is valid (physics-validated, correctly rendered after fixing a bug where all action labels were wrong). The problem is BC fundamentally — 3 discrete actions with long-horizon strategic dependencies can't be captured from imitation.
 
-## Architecture
+### Architecture
 
 ```
 Input: 7ch ego-centric 128x128 (self/enemy trails, prev frame, speed/erase powerups, Voronoi territory)
@@ -58,13 +70,4 @@ Input: 7ch ego-centric 128x128 (self/enemy trails, prev frame, speed/erase power
   → Critic(128→1)        → value estimate
 ```
 
-## Files
-
-- `curvecrash_env_ffa.py` — module, Gym environment (512x512 arena, FFA, powerups)
-- `train_selfplay.py` — PPO + PFSP self-play training loop
-- `experiments.py` — Model architectures (IMPALA-CNN, Voronoi wrapper)
-- `watch_agent_ffa.py` — UI only, Pygame viewer for local evaluation
-- `replay_pipeline.py` — Scrape replays, render to observations, produce BC data
-- `export_model.py` — Convert PyTorch checkpoint to TensorFlow.js
-- `CurveCrash-AI-v6.user.js` — Browser userscript for live play
-- `index.html` — Standalone browser demo (GitHub Pages)
+</details>
