@@ -47,12 +47,10 @@ canvas#game { background:#0d0d18; border:2px solid #1a1a2e; border-radius:4px; i
       <div style="font-size:12px;color:#888;margin-bottom:4px">AI Model</div>
       <select id="model-sel" style="width:100%;padding:4px;background:#1a1a2e;color:#0f0;border:1px solid #333;border-radius:3px;font-size:12px;font-family:monospace">
         <option value="curvecrash_v8_weights.json" selected>v8 IMPALA 7ch (best)</option>
+        <option value="models/v11.json">v11 IMPALA 9ch + scalars</option>
         <option value="models/v9.json">v9 IMPALA 7ch</option>
         <option value="models/v9_1.json">v9.1 IMPALA 7ch</option>
-        <option value="models/v6_aggressive.json">v6 NatureCNN 6ch</option>
-        <option value="models/exp_impala_6ch.json">exp IMPALA 6ch</option>
         <option value="models/exp_voronoi_7ch.json">exp NatureCNN+Voronoi 7ch</option>
-        <option value="models/exp_baseline_6ch.json">exp baseline 6ch</option>
         <option value="">custom file...</option>
       </select>
     </div>
@@ -174,7 +172,7 @@ const _spdCh = new Float32Array(OBS*OBS);
 const _ersCh = new Float32Array(OBS*OBS);
 const _blocked = new Uint8Array(OBS*OBS);
 const _territory = new Uint8Array(OBS*OBS);
-const _obsNhwc = new Float32Array(OBS*OBS*7);
+const _obsNhwc = new Float32Array(OBS*OBS*9); // max 9ch for v11
 const _vorBuf = new Float32Array(OBS*OBS);
 
 // ======================== CANVAS ========================
@@ -301,13 +299,19 @@ function buildTFModel(json) {
   m.hasSA = json.has_spatial_attn;
   if (m.hasSA) { const l = layers[idx++]; m.sa = { qkv: decW(l,'qkv_weight'), pW: decW(l,'proj_weight'), pB: decW(l,'proj_bias'), nh: l.num_heads, d: l.dim }; }
   const fcL = layers[idx++]; m.fc = { w: decW(fcL,'weight'), b: decW(fcL,'bias') };
+  // Scalar FC branch (v10/v11)
+  m.hasScalar = (json.n_scalar_inputs || 0) > 0;
+  if (m.hasScalar) {
+    const sl = layers[idx++];
+    m.scalarFc = { w0: decW(sl,'w0'), b0: decW(sl,'b0'), w1: decW(sl,'w1'), b1: decW(sl,'b1') };
+  }
   m.hasGRU = json.gru_hidden > 0;
   if (m.hasGRU) { const gl = layers[idx++]; m.gruH = gl.units; m.gru = {}; for (const g of ['reset','update','new']) m.gru[g] = decGRUGate(gl.gates[g]); }
   const aL = layers[idx++]; m.actor = { w: decW(aL,'weight'), b: decW(aL,'bias') };
   return m;
 }
 
-function aiInfer(obsNhwc, player) {
+function aiInfer(obsNhwc, player, scalars) {
   if (!G.model) return 1;
   const t0 = performance.now(); const m = G.model; let newGru = null;
   const act = tf.tidy(() => {
@@ -332,6 +336,12 @@ function aiInfer(obsNhwc, player) {
       x = tok.add(tf.matMul(tf.matMul(tf.softmax(tf.matMul(q,k.transpose([0,1,3,2])).mul(sc),-1),v).transpose([0,2,1,3]).reshape([1,nt,C]),sa.pW).add(sa.pB)).reshape([1,H,W,C]);
     }
     x = tf.relu(tf.matMul(x.reshape([1,-1]),m.fc.w).add(m.fc.b));
+    // Scalar branch: FC(13→64→64) concatenated with CNN features before GRU
+    if (m.hasScalar && scalars) {
+      const st = tf.tensor2d(scalars, [1, scalars.length]);
+      const sf = tf.relu(tf.matMul(tf.relu(tf.matMul(st, m.scalarFc.w0).add(m.scalarFc.b0)), m.scalarFc.w1).add(m.scalarFc.b1));
+      x = tf.concat([x, sf], 1); // [1, 256+64=320]
+    }
     if (m.hasGRU) {
       const h = player.gruTensor || tf.zeros([1,m.gruH]);
       const rg=m.gru.reset, zg=m.gru.update, ng=m.gru.new;
@@ -481,12 +491,48 @@ function buildObs(pid) {
     obs[i*nCh] = rS[i]; obs[i*nCh+1] = rE[i]; obs[i*nCh+2] = rPS[i]; obs[i*nCh+3] = rPE[i];
     obs[i*nCh+4] = rSpd[i]; obs[i*nCh+5] = rErs[i];
     if (nCh >= 7) obs[i*nCh+6] = rV[i];
+    // v11: minimap = non-rotated world-frame self/enemy (channels 7-8)
+    if (nCh >= 9) { obs[i*nCh+7] = selfDs[i]; obs[i*nCh+8] = enemyDs[i]; }
   }
 
-  // Store world-frame for next frame's prev channels
+  // Scalar obs (13 values) for models that use scalar branch
+  let scalars = null;
+  if (G.model && G.model.hasScalar) {
+    scalars = new Float32Array(13);
+    // 8 ray distances (ego-relative, 45° apart)
+    const maxDist = 256.0, stepSz = 2.0, nSteps = Math.floor(maxDist/stepSz);
+    for (let ri = 0; ri < 8; ri++) {
+      const rayA = me.angle + ri * Math.PI * 2 / 8;
+      const rdx = Math.cos(rayA) * stepSz, rdy = Math.sin(rayA) * stepSz;
+      let rx = me.x, ry = me.y;
+      scalars[ri] = 1.0; // default: max distance
+      for (let s = 1; s <= nSteps; s++) {
+        rx += rdx; ry += rdy;
+        const ix = Math.round(rx), iy = Math.round(ry);
+        if (ix < 0 || ix >= A || iy < OFF_Y || iy >= OFF_Y + ARENA_H) { scalars[ri] = s*stepSz/maxDist; break; }
+        if (ix >= 0 && ix < A && iy >= 0 && iy < A) {
+          const owner = G.trailOwner[iy*A+ix];
+          if (owner > 0) {
+            if (owner === pid && G.trailFrame[iy*A+ix] < G.step - SKIP_FRAMES) { scalars[ri] = s*stepSz/maxDist; break; }
+            else if (owner !== pid) { scalars[ri] = s*stepSz/maxDist; break; }
+          }
+        }
+      }
+    }
+    scalars[8] = me.speedBoosts.length > 0 ? 1.0 : 0.0; // speed boost active
+    scalars[9] = me.nextGapAt > 0 ? Math.min(1.0, me.gapTimer / me.nextGapAt) : 0.0; // gap progress
+    let aliveOpp = 0, totalOpp = G.players.length - 1;
+    for (const p of G.players) if (p.id !== pid && p.alive) aliveOpp++;
+    scalars[10] = totalOpp > 0 ? aliveOpp / totalOpp : 0.0; // alive fraction
+    scalars[11] = 0.0; // territory fraction (would need voronoi area calc, approximate as 0)
+    let sMult = 1.0;
+    for (const b of me.speedBoosts) sMult *= b.mult;
+    scalars[12] = Math.min(1.0, sMult / 4.0); // speed multiplier normalized
+  }
+
   me.prevSelf = selfDs; me.prevEnemy = enemyDs;
   G._vizSelf = selfDs; G._vizEnemy = enemyDs;
-  return obs;
+  return { obs, scalars };
 }
 
 // ======================== TRAIL DRAWING (matches env _draw_trail) ========================
@@ -637,8 +683,8 @@ function physicsStep() {
       else if (keys['ArrowRight'] || keys['KeyD']) action = 2;
     } else {
       if (G.model && p.stepCount % 3 === 0) {
-        const obs = buildObs(p.id);
-        if (obs) action = aiInfer(obs, p);
+        const result = buildObs(p.id);
+        if (result) action = aiInfer(result.obs, p, result.scalars);
         p._lastAction = action;
       } else { action = p._lastAction; }
     }
