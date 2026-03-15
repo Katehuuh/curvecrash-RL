@@ -720,6 +720,40 @@
         return obs;
     }
 
+    // ==================== BASE64 WEIGHT DECODING ====================
+    function _b64toF32(b64, shape) {
+        const bin = atob(b64);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        const f = new Float32Array(bytes.buffer);
+        if (shape.length === 1) return tf.tensor1d(f);
+        if (shape.length === 2) return tf.tensor2d(f, shape);
+        if (shape.length === 4) return tf.tensor4d(f, shape);
+        return tf.tensor(f, shape);
+    }
+
+    function _decW(layer, key) {
+        const v = layer[key];
+        if (typeof v === 'string' && layer[key + '_shape']) return _b64toF32(v, layer[key + '_shape']);
+        if (Array.isArray(v)) {
+            if (v.length > 0 && Array.isArray(v[0])) {
+                if (Array.isArray(v[0][0])) { if (Array.isArray(v[0][0][0])) return tf.tensor4d(v); return tf.tensor3d(v); }
+                return tf.tensor2d(v);
+            }
+            return tf.tensor1d(v);
+        }
+        return null;
+    }
+
+    function _decGate(g) {
+        return {
+            Wi: typeof g.kernel_input === 'string' ? _b64toF32(g.kernel_input, g.kernel_input_shape) : tf.tensor2d(g.kernel_input),
+            Wh: typeof g.kernel_hidden === 'string' ? _b64toF32(g.kernel_hidden, g.kernel_hidden_shape) : tf.tensor2d(g.kernel_hidden),
+            bi: typeof g.bias_input === 'string' ? _b64toF32(g.bias_input, g.bias_input_shape) : tf.tensor1d(g.bias_input),
+            bh: typeof g.bias_hidden === 'string' ? _b64toF32(g.bias_hidden, g.bias_hidden_shape) : tf.tensor1d(g.bias_hidden),
+        };
+    }
+
     // ==================== MODEL INFERENCE (v6 + IMPALA) ====================
     function buildTFModel(weightsJson) {
         const model = { version: weightsJson.version || 'v6' };
@@ -730,92 +764,51 @@
         let idx = 0;
 
         if (model.arch === 'impala') {
-            // IMPALA ConvSequence stages
             const numStages = weightsJson.impala_channels ? weightsJson.impala_channels.length : 3;
             model.impalaStages = [];
             for (let si = 0; si < numStages; si++) {
                 const l = layers[idx++];
                 model.impalaStages.push({
-                    convW: tf.tensor4d(l.conv_weight),
-                    convB: tf.tensor1d(l.conv_bias),
-                    res1c1W: tf.tensor4d(l.res1_conv1_weight),
-                    res1c1B: tf.tensor1d(l.res1_conv1_bias),
-                    res1c2W: tf.tensor4d(l.res1_conv2_weight),
-                    res1c2B: tf.tensor1d(l.res1_conv2_bias),
-                    res2c1W: tf.tensor4d(l.res2_conv1_weight),
-                    res2c1B: tf.tensor1d(l.res2_conv1_bias),
-                    res2c2W: tf.tensor4d(l.res2_conv2_weight),
-                    res2c2B: tf.tensor1d(l.res2_conv2_bias),
+                    convW: _decW(l,'conv_weight'), convB: _decW(l,'conv_bias'),
+                    res1c1W: _decW(l,'res1_conv1_weight'), res1c1B: _decW(l,'res1_conv1_bias'),
+                    res1c2W: _decW(l,'res1_conv2_weight'), res1c2B: _decW(l,'res1_conv2_bias'),
+                    res2c1W: _decW(l,'res2_conv1_weight'), res2c1B: _decW(l,'res2_conv1_bias'),
+                    res2c2W: _decW(l,'res2_conv2_weight'), res2c2B: _decW(l,'res2_conv2_bias'),
                 });
             }
         } else {
-            // NatureCNN: 3 Conv layers
             model.conv = [];
             for (let i = 0; i < 3; i++) {
                 const l = layers[idx++];
-                model.conv.push({
-                    w: tf.tensor4d(l.weight, l.shape_tfjs),
-                    b: tf.tensor1d(l.bias),
-                    stride: l.stride,
-                });
+                model.conv.push({ w: _decW(l,'weight'), b: _decW(l,'bias'), stride: l.stride });
             }
         }
 
-        // CBAM (if present)
         model.hasCBAM = weightsJson.has_cbam;
         if (model.hasCBAM) {
             const l = layers[idx++];
-            model.cbam = {
-                fc0w: tf.tensor2d(l.channel_fc0_weight),
-                fc2w: tf.tensor2d(l.channel_fc2_weight),
-                spConvW: tf.tensor4d(l.spatial_conv_weight),
-            };
+            model.cbam = { fc0w: _decW(l,'channel_fc0_weight'), fc2w: _decW(l,'channel_fc2_weight'), spConvW: _decW(l,'spatial_conv_weight') };
         }
 
-        // Spatial self-attention (if present)
         model.hasSpatialAttn = weightsJson.has_spatial_attn;
         if (model.hasSpatialAttn) {
             const l = layers[idx++];
-            model.spatialAttn = {
-                qkvW: tf.tensor2d(l.qkv_weight),
-                projW: tf.tensor2d(l.proj_weight),
-                projB: tf.tensor1d(l.proj_bias),
-                numHeads: l.num_heads,
-                dim: l.dim,
-                tokens: l.tokens,
-            };
+            model.spatialAttn = { qkvW: _decW(l,'qkv_weight'), projW: _decW(l,'proj_weight'), projB: _decW(l,'proj_bias'), numHeads: l.num_heads, dim: l.dim, tokens: l.tokens };
         }
 
-        // FC hidden
         const fcL = layers[idx++];
-        model.fc = {
-            w: tf.tensor2d(fcL.weight, fcL.shape_tfjs),
-            b: tf.tensor1d(fcL.bias),
-        };
+        model.fc = { w: _decW(fcL,'weight'), b: _decW(fcL,'bias') };
 
-        // GRU
         model.hasGRU = weightsJson.gru_hidden > 0;
         if (model.hasGRU) {
             const gruL = layers[idx++];
             model.gruHidden = gruL.units;
             model.gru = {};
-            for (const gate of ['reset', 'update', 'new']) {
-                const g = gruL.gates[gate];
-                model.gru[gate] = {
-                    Wi: tf.tensor2d(g.kernel_input),
-                    Wh: tf.tensor2d(g.kernel_hidden),
-                    bi: tf.tensor1d(g.bias_input),
-                    bh: tf.tensor1d(g.bias_hidden),
-                };
-            }
+            for (const gate of ['reset', 'update', 'new']) model.gru[gate] = _decGate(gruL.gates[gate]);
         }
 
-        // Actor head
         const actL = layers[idx++];
-        model.actor = {
-            w: tf.tensor2d(actL.weight, actL.shape_tfjs),
-            b: tf.tensor1d(actL.bias),
-        };
+        model.actor = { w: _decW(actL,'weight'), b: _decW(actL,'bias') };
 
         return model;
     }
