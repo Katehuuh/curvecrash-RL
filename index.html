@@ -315,7 +315,9 @@ function aiInfer(obsNhwc, player, scalars) {
   if (!G.model) return 1;
   const t0 = performance.now(); const m = G.model; let newGru = null;
   const act = tf.tidy(() => {
-    let x = tf.tensor4d(obsNhwc, [1, OBS, OBS, m.nCh]);
+    // Slice buffer to actual channel count (buffer is pre-allocated for max 9ch)
+    const obsSlice = obsNhwc.length === OBS*OBS*m.nCh ? obsNhwc : obsNhwc.subarray(0, OBS*OBS*m.nCh);
+    let x = tf.tensor4d(obsSlice, [1, OBS, OBS, m.nCh]);
     if (m.arch === 'impala') {
       for (const s of m.stages) {
         x = tf.conv2d(x, s.cW, 1, 'same').add(s.cB); x = tf.maxPool(x, 3, 2, 'same');
