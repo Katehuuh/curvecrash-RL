@@ -43,7 +43,19 @@ canvas#game { background:#0d0d18; border:2px solid #1a1a2e; border-radius:4px; i
     <div class="info-box" id="model-info">
       <span class="label">Model:</span> <span class="val-warn">loading v8 weights...</span>
     </div>
-    <button id="btn-load" style="background:none;border:1px solid #333;color:#666;font-size:11px;padding:3px 8px;border-radius:3px;cursor:pointer;width:100%">load custom weights (.json)</button>
+    <div>
+      <div style="font-size:12px;color:#888;margin-bottom:4px">AI Model</div>
+      <select id="model-sel" style="width:100%;padding:4px;background:#1a1a2e;color:#0f0;border:1px solid #333;border-radius:3px;font-size:12px;font-family:monospace">
+        <option value="curvecrash_v8_weights.json" selected>v8 IMPALA 7ch (best)</option>
+        <option value="models/v9.json">v9 IMPALA 7ch</option>
+        <option value="models/v9_1.json">v9.1 IMPALA 7ch</option>
+        <option value="models/v6_aggressive.json">v6 NatureCNN 6ch</option>
+        <option value="models/exp_impala_6ch.json">exp IMPALA 6ch</option>
+        <option value="models/exp_voronoi_7ch.json">exp NatureCNN+Voronoi 7ch</option>
+        <option value="models/exp_baseline_6ch.json">exp baseline 6ch</option>
+        <option value="">custom file...</option>
+      </select>
+    </div>
     <button class="btn btn-start" id="btn-start">START GAME</button>
     <div class="info-box" id="score-info">
       <div><span class="label">Human:</span> <span class="val" id="s-human">0</span></div>
@@ -182,24 +194,57 @@ document.addEventListener('keydown', e => { keys[e.code] = true; if ((e.code ===
 document.addEventListener('keyup', e => { keys[e.code] = false; });
 
 // ======================== UI WIRING ========================
-document.getElementById('btn-load').onclick = loadWeights;
+document.getElementById('model-sel').onchange = async e => {
+  const val = e.target.value;
+  if (val === '') { loadWeights(); return; }
+  await loadModelFromURL(val);
+};
 document.getElementById('btn-start').onclick = () => { if (!G.running) { clearTimeout(G._restartTimer); startRound(); } else endRound('abort'); };
 document.getElementById('speed-sel').onclick = e => { if (!e.target.dataset.speed) return; G.gameSpeed = parseFloat(e.target.dataset.speed); document.querySelectorAll('#speed-sel button').forEach(b => b.classList.toggle('active', b === e.target)); };
 document.getElementById('player-sel').onclick = e => { if (!e.target.dataset.p) return; G.maxPlayers = parseInt(e.target.dataset.p); document.querySelectorAll('#player-sel button').forEach(b => b.classList.toggle('active', b === e.target)); };
 
 // ======================== WEIGHT LOADING ========================
+function applyModel(json) {
+  // Dispose old model tensors
+  if (G.model) {
+    // TF.js tensors in model need explicit disposal
+    const dispose = t => { if (t && t.dispose) t.dispose(); };
+    if (G.model.stages) G.model.stages.forEach(s => Object.values(s).forEach(dispose));
+    if (G.model.conv) G.model.conv.forEach(c => { dispose(c.w); dispose(c.b); });
+    if (G.model.cbam) Object.values(G.model.cbam).forEach(dispose);
+    if (G.model.sa) Object.values(G.model.sa).forEach(v => dispose(v));
+    dispose(G.model.fc?.w); dispose(G.model.fc?.b);
+    if (G.model.gru) Object.values(G.model.gru).forEach(g => Object.values(g).forEach(dispose));
+    dispose(G.model.actor?.w); dispose(G.model.actor?.b);
+  }
+  // Dispose all player GRU states
+  for (const p of G.players) if (p.gruTensor) { p.gruTensor.dispose(); p.gruTensor = null; }
+  G.model = buildTFModel(json);
+  const info = document.getElementById('model-info');
+  info.innerHTML = `<span class="label">Model:</span> <span class="val">${G.model.arch} ${G.model.nCh}ch</span>`;
+}
+
+async function loadModelFromURL(url) {
+  const info = document.getElementById('model-info');
+  info.innerHTML = '<span class="label">Loading...</span>';
+  try {
+    const resp = await fetch(url);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const json = await resp.json();
+    applyModel(json);
+    overlay.querySelector('p').textContent = 'Press START or Space to play!';
+  } catch(err) { info.innerHTML = `<span class="val-bad">Error: ${err.message}</span>`; }
+}
+
 function loadWeights() {
   const input = document.createElement('input'); input.type = 'file'; input.accept = '.json';
   input.onchange = async e => {
     const file = e.target.files[0]; if (!file) return;
-    const info = document.getElementById('model-info');
-    info.innerHTML = '<span class="label">Loading...</span>';
     try {
       const json = JSON.parse(await file.text());
-      G.model = buildTFModel(json);
-      info.innerHTML = `<span class="label">Model:</span> <span class="val">${G.model.arch} ${G.model.nCh}ch</span>`;
+      applyModel(json);
       overlay.querySelector('p').textContent = 'Press START or Space to play!';
-    } catch(err) { info.innerHTML = `<span class="val-bad">Error: ${err.message}</span>`; }
+    } catch(err) { document.getElementById('model-info').innerHTML = `<span class="val-bad">Error: ${err.message}</span>`; }
   };
   input.click();
 }
@@ -762,18 +807,7 @@ function gameLoop(ts) {
 
 // ======================== AUTO-LOAD + INIT ========================
 async function autoLoadWeights() {
-  const info = document.getElementById('model-info');
-  info.innerHTML = '<span class="label">Loading v8 weights...</span>';
-  try {
-    const resp = await fetch('curvecrash_v8_weights.json');
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    const json = await resp.json();
-    G.model = buildTFModel(json);
-    info.innerHTML = `<span class="label">Model:</span> <span class="val">${G.model.arch} ${G.model.nCh}ch</span>`;
-    overlay.querySelector('p').textContent = 'Press START or Space to play!';
-  } catch(e) {
-    info.innerHTML = '<span class="val-warn">Auto-load failed — use load button</span>';
-  }
+  await loadModelFromURL('curvecrash_v8_weights.json');
 }
 
 async function init() {
