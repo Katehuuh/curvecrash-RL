@@ -254,7 +254,23 @@ function b64toF32(b64str, shape) {
   const bin = atob(b64str);
   const bytes = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  const floats = new Float32Array(bytes.buffer);
+  const dv = new DataView(bytes.buffer);
+  // Auto-detect: float16 (2 bytes/elem) vs float32 (4 bytes/elem)
+  const totalElems = shape.reduce((a, b) => a * b, 1);
+  let floats;
+  if (bytes.length === totalElems * 2) {
+    // Float16 → Float32 conversion
+    floats = new Float32Array(totalElems);
+    for (let i = 0; i < totalElems; i++) {
+      const h = dv.getUint16(i * 2, true);
+      const s = (h >> 15) & 1, e = (h >> 10) & 0x1f, m = h & 0x3ff;
+      if (e === 0) floats[i] = (s ? -1 : 1) * Math.pow(2, -14) * (m / 1024);
+      else if (e === 31) floats[i] = m ? NaN : (s ? -Infinity : Infinity);
+      else floats[i] = (s ? -1 : 1) * Math.pow(2, e - 15) * (1 + m / 1024);
+    }
+  } else {
+    floats = new Float32Array(bytes.buffer);
+  }
   if (shape.length === 1) return tf.tensor1d(floats);
   if (shape.length === 2) return tf.tensor2d(floats, shape);
   if (shape.length === 4) return tf.tensor4d(floats, shape);

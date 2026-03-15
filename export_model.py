@@ -313,8 +313,8 @@ def _append_actor(state_dict, layers):
 
 
 def _compact_value(v):
-    """Convert a list/nested-list of floats to base64 float32 string + shape."""
-    arr = np.array(v, dtype=np.float32)
+    """Convert a list/nested-list of floats to base64 float16 string + shape."""
+    arr = np.array(v, dtype=np.float16)
     return base64.b64encode(arr.tobytes()).decode('ascii'), list(arr.shape)
 
 
@@ -348,7 +348,7 @@ def _compact_layer(layer):
 def _save_and_report(model_json, output_path, compact=True):
     """Save JSON and print stats."""
     if compact:
-        model_json['encoding'] = 'base64_float32'
+        model_json['encoding'] = 'base64_float16'
         model_json['layers'] = [_compact_layer(l) for l in model_json['layers']]
 
     with open(output_path, "w") as f:

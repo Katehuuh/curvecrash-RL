@@ -725,7 +725,22 @@
         const bin = atob(b64);
         const bytes = new Uint8Array(bin.length);
         for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-        const f = new Float32Array(bytes.buffer);
+        const dv = new DataView(bytes.buffer);
+        const totalElems = shape.reduce((a, b) => a * b, 1);
+        let f;
+        if (bytes.length === totalElems * 2) {
+            // Float16 → Float32
+            f = new Float32Array(totalElems);
+            for (let i = 0; i < totalElems; i++) {
+                const h = dv.getUint16(i * 2, true);
+                const s = (h >> 15) & 1, e = (h >> 10) & 0x1f, m = h & 0x3ff;
+                if (e === 0) f[i] = (s ? -1 : 1) * Math.pow(2, -14) * (m / 1024);
+                else if (e === 31) f[i] = m ? NaN : (s ? -Infinity : Infinity);
+                else f[i] = (s ? -1 : 1) * Math.pow(2, e - 15) * (1 + m / 1024);
+            }
+        } else {
+            f = new Float32Array(bytes.buffer);
+        }
         if (shape.length === 1) return tf.tensor1d(f);
         if (shape.length === 2) return tf.tensor2d(f, shape);
         if (shape.length === 4) return tf.tensor4d(f, shape);
