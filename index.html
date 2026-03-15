@@ -194,6 +194,8 @@ document.addEventListener('keyup', e => { keys[e.code] = false; });
 // ======================== UI WIRING ========================
 document.getElementById('model-sel').onchange = async e => {
   const val = e.target.value;
+  if (G.running) endRound('abort');
+  clearTimeout(G._restartTimer);
   if (val === '') { loadWeights(); return; }
   await loadModelFromURL(val);
 };
