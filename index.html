@@ -22,7 +22,7 @@ body { background:#0a0a12; color:#e0e0e0; font-family:'Segoe UI',system-ui,sans-
 .info-box .val-warn { color:#f80; }
 .info-box .val-bad { color:#f44; }
 #game-wrap { flex:1; display:flex; align-items:center; justify-content:center; position:relative; }
-canvas#game { background:#0d0d18; border:2px solid #1a1a2e; border-radius:4px; image-rendering:auto; }
+canvas#game { background:#0d0d18; border:2px solid #1a1a2e; border-radius:4px; image-rendering:pixelated; }
 #overlay { position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); text-align:center; pointer-events:none; }
 #overlay h2 { font-size:28px; color:#0ff; text-shadow:0 0 20px #0ff8; margin-bottom:8px; }
 #overlay p { font-size:16px; color:#aaa; }
@@ -74,7 +74,7 @@ canvas#game { background:#0d0d18; border:2px solid #1a1a2e; border-radius:4px; i
     </div>
     <div id="ai-viz-wrap">
       <canvas id="ai-viz" width="128" height="128" style="width:128px;height:128px;"></canvas>
-      <div id="ai-viz-label">AI observation (ego-centric)</div>
+      <div id="ai-viz-label">AI trail view (world-frame)</div>
     </div>
     <div id="controls-hint">
       <b>Controls:</b> Arrow Left/Right to steer<br>
@@ -347,6 +347,10 @@ function buildObs(pid) {
     }
   }
 
+  // Save raw trail-only copies for Voronoi (before walls/arrows are merged)
+  const selfTrailOnly = new Float32Array(selfDs);
+  const enemyTrailOnly = new Float32Array(enemyDs);
+
   // Step 3: add wall mask
   for (let i = 0; i < NN; i++) if (WALL_MASK[i]) selfDs[i] = 1;
 
@@ -394,7 +398,8 @@ function buildObs(pid) {
     // BFS at obs resolution
     _blocked.fill(0); _territory.fill(0);
     const blocked = _blocked, territory = _territory;
-    for (let i = 0; i < NN; i++) if (selfDs[i] > .5 || enemyDs[i] > .5) blocked[i] = 1;
+    // Use raw trail-only grids (no walls/arrows) to match env's trail_owner > 0
+    for (let i = 0; i < NN; i++) if (selfTrailOnly[i] > .5 || enemyTrailOnly[i] > .5) blocked[i] = 1;
     const ehx = Math.round(hx), ehy = Math.round(hy), ei = ehy*N+ehx;
     let egoQ = [], enemyQ = [];
     if (ei >= 0 && ei < NN && !blocked[ei]) { territory[ei] = 1; blocked[ei] = 1; egoQ.push(ei); }
@@ -496,7 +501,7 @@ function sweptCollision(p) {
   const dx = p.x - px, dy = p.y - py;
   const dist = Math.sqrt(dx*dx + dy*dy);
   const steps = Math.max(1, Math.ceil(dist));
-  for (let s = 1; s <= steps; s++) {
+  for (let s = 0; s <= steps; s++) {
     const t = s / steps;
     if (checkCollision(px + dx*t, py + dy*t, p.id)) return true;
   }
