@@ -86,9 +86,8 @@
         gsAlive: true,
         gsSpeedMult: 1.0,
         lastAliveCheck: 0,
-        // Trail tracking (self-built, since c.particles is always empty)
-        selfTrail: null,     // Float32Array(128*128) — persistent self trail grid
-        enemyTrail: null,    // Float32Array(128*128) — persistent enemy trail grid
+        // Trail tracking at sim resolution (512x512), matching env's trail_owner
+        trailOwner: null,    // Int8Array(512*512) — 0=empty, 1=self, 2=enemy
         prevTrailPos: {},    // curveId -> {fieldX, fieldY, serverX, serverY, lastTs}
         prevPowerupIds: new Set(), // track powerup IDs to detect erase pickup
         // Perf metrics
@@ -196,10 +195,8 @@
             if (S.prevPowerupList && S.selfTrail) {
                 for (const prev of S.prevPowerupList) {
                     if (prev.powerupId !== 1 && !currentPupIds.has(prev.uid)) {
-                        // Erase powerup disappeared — clear trail grids
-                        const NN = CFG.RES * CFG.RES;
-                        S.selfTrail.fill(0);
-                        S.enemyTrail.fill(0);
+                        // Erase powerup disappeared — clear trail grid
+                        if (S.trailOwner) S.trailOwner.fill(0);
                         console.log(`[AI] Erase detected! Cleared trail grids.`);
                         break;
                     }
@@ -322,59 +319,51 @@
         }
     }
 
-    // ==================== TRAIL LINE RASTERIZER ====================
-    function rasterizeTrailLine(grid, x0, y0, x1, y1, hw, N) {
-        /**
-         * Draw a line from (x0,y0) to (x1,y1) on grid with half-width hw.
-         * Matches env's _draw_trail(): interpolate along segment, stamp perpendicular.
-         * grid: Float32Array(N*N), coords in obs space (0..N-1).
-         */
+    // ==================== TRAIL TRACKING AT SIM RESOLUTION (512x512) ====================
+    // Trail width at sim resolution: (6.3/922)*512 ≈ 3.5px, hw = max(1, round(3.5/2)) = 2
+    const TRAIL_HW_SIM = 2;
+    const HEAD_R_SIM = 2;
+
+    function stampTrailSim(grid, x0, y0, x1, y1, angle, val) {
+        /** Draw trail from (x0,y0) to (x1,y1) at 512x512 with perpendicular stamps.
+         *  Matches env's _draw_trail exactly. */
+        const A = ARENA_SIM, hw = TRAIL_HW_SIM;
         const dx = x1 - x0, dy = y1 - y0;
         const dist = Math.sqrt(dx * dx + dy * dy);
-        if (dist < 0.01) return; // no movement
-
+        if (dist < 0.01) return;
         const nStamps = Math.max(1, Math.ceil(dist));
-        // Perpendicular direction for width stamping
-        const perpX = -dy / dist;
-        const perpY = dx / dist;
-
+        let perpX, perpY;
+        if (dist > 0.5) { perpX = -dy / dist; perpY = dx / dist; }
+        else { perpX = -Math.sin(angle); perpY = Math.cos(angle); }
         for (let s = 0; s <= nStamps; s++) {
             const t = s / nStamps;
-            const cx = x0 + dx * t;
-            const cy = y0 + dy * t;
-
+            const sx = x0 + dx * t, sy = y0 + dy * t;
             for (let i = -hw; i <= hw; i++) {
-                const ix = Math.round(cx + perpX * i);
-                const iy = Math.round(cy + perpY * i);
-                if (ix >= 0 && ix < N && iy >= 0 && iy < N) {
-                    grid[iy * N + ix] = 1.0;
+                const cx = Math.round(sx + perpX * i), cy = Math.round(sy + perpY * i);
+                if (cx >= 0 && cx < A && cy >= 0 && cy < A) grid[cy * A + cx] = val;
+            }
+        }
+        // Head circle
+        const ix = Math.round(x1), iy = Math.round(y1);
+        for (let dy2 = -HEAD_R_SIM; dy2 <= HEAD_R_SIM; dy2++) {
+            for (let dx2 = -HEAD_R_SIM; dx2 <= HEAD_R_SIM; dx2++) {
+                if (dx2*dx2 + dy2*dy2 <= HEAD_R_SIM*HEAD_R_SIM) {
+                    const cx = ix+dx2, cy = iy+dy2;
+                    if (cx >= 0 && cx < A && cy >= 0 && cy < A) grid[cy * A + cx] = val;
                 }
             }
         }
     }
 
-    // ==================== TRAIL TRACKING (self-built, with extrapolation) ====================
     function updateTrailTracking() {
-        /**
-         * Track player positions each rAF tick and draw trail lines on persistent grids.
-         * c.particles is always empty (cosmetic effects only), so we build our own
-         * trail data by recording positions — matching how the env's trail_owner works.
-         *
-         * EXTRAPOLATION: Server sends position updates at ~3-10Hz, but rAF runs at 60fps.
-         * Between server updates, we extrapolate forward using heading + speed so the trail
-         * density matches the training env (~60fps physics). Without this, trails are 10-20x
-         * too sparse and the model sees almost no trail data.
-         */
+        /** Track player positions and draw trails into 512x512 trailOwner grid.
+         *  1=self, 2=enemy. Matches env's trail_owner at sim resolution. */
         const round = pageWindow.gameGraphics?.gameEngine?.round;
         if (!round) return;
         const curves = round.getCurves();
         const me = curves.find(c => c.player?.isMyPlayer);
-        if (!me) return;
+        if (!me || !S.trailOwner) return;
 
-        if (!S.selfTrail || !S.enemyTrail) return;
-
-        const N = CFG.RES;
-        const hw = 1; // trail half-width at obs res (~1px, matching env's .any() downsample)
         const now = performance.now();
         const gs = round.gameSettings;
         const fps = gs?.fps || 60;
@@ -383,143 +372,108 @@
             if (!c.state?.isAlive) continue;
             const cid = c.curveId;
             const isSelf = (cid === me.curveId);
-            const grid = isSelf ? S.selfTrail : S.enemyTrail;
+            const val = isSelf ? 1 : 2;
 
             const serverX = c.state.x;
             const serverY = c.state.y;
             const angle = c.state.angle;
-            // c.state.speed is in field px per game frame (base = curveSpeed/fps ≈ 3)
             const speed = c.state.speed || ((gs?.curveSpeed || 180) / fps);
-
             const holeLeft = c.state.holeLeft;
             const inHole = (typeof holeLeft === 'number' && holeLeft > 0);
 
-            // First time seeing this curve — initialize, don't draw yet
             if (!S.prevTrailPos[cid]) {
-                S.prevTrailPos[cid] = {
-                    fieldX: serverX,
-                    fieldY: serverY,
-                    serverX: serverX,
-                    serverY: serverY,
-                    lastTs: now,
-                };
+                S.prevTrailPos[cid] = { fieldX: serverX, fieldY: serverY, serverX, serverY, lastTs: now };
                 continue;
             }
 
             const prev = S.prevTrailPos[cid];
             const serverMoved = (serverX !== prev.serverX || serverY !== prev.serverY);
-
             let newFieldX, newFieldY;
-
             if (serverMoved) {
-                // Server sent a new position — snap to authoritative coords
-                newFieldX = serverX;
-                newFieldY = serverY;
-                prev.serverX = serverX;
-                prev.serverY = serverY;
+                newFieldX = serverX; newFieldY = serverY;
+                prev.serverX = serverX; prev.serverY = serverY;
             } else {
-                // No server update — extrapolate forward using heading + speed
-                const dtSec = Math.min((now - prev.lastTs) / 1000, 0.05); // cap at 50ms
-                const fieldSpeedPerSec = speed * fps; // e.g. 3 * 60 = 180 field px/s
+                const dtSec = Math.min((now - prev.lastTs) / 1000, 0.05);
+                const fieldSpeedPerSec = speed * fps;
                 newFieldX = prev.fieldX + Math.cos(angle) * fieldSpeedPerSec * dtSec;
                 newFieldY = prev.fieldY + Math.sin(angle) * fieldSpeedPerSec * dtSec;
             }
 
-            // Convert field coords to obs coords for trail drawing
-            const prevOX = prev.fieldX * OBS_SCALE;
-            const prevOY = prev.fieldY * OBS_SCALE + OBS_OFFSET_Y;
-            const newOX = newFieldX * OBS_SCALE;
-            const newOY = newFieldY * OBS_SCALE + OBS_OFFSET_Y;
-
+            // Convert field coords to sim coords for trail drawing
             if (!inHole) {
-                rasterizeTrailLine(grid, prevOX, prevOY, newOX, newOY, hw, N);
-                // Head circle at current position (like env's _draw_trail head stamp)
-                const ix = Math.round(newOX), iy = Math.round(newOY);
-                for (let dy = -hw; dy <= hw; dy++) {
-                    for (let dx = -hw; dx <= hw; dx++) {
-                        if (dx * dx + dy * dy <= hw * hw) {
-                            const cx = ix + dx, cy = iy + dy;
-                            if (cx >= 0 && cx < N && cy >= 0 && cy < N) {
-                                grid[cy * N + cx] = 1.0;
-                            }
-                        }
-                    }
-                }
+                const prevSX = prev.fieldX * SIM_SCALE;
+                const prevSY = prev.fieldY * SIM_SCALE + ARENA_OFFSET_Y;
+                const newSX = newFieldX * SIM_SCALE;
+                const newSY = newFieldY * SIM_SCALE + ARENA_OFFSET_Y;
+                stampTrailSim(S.trailOwner, prevSX, prevSY, newSX, newSY, angle, val);
             }
 
-            prev.fieldX = newFieldX;
-            prev.fieldY = newFieldY;
-            prev.lastTs = now;
+            prev.fieldX = newFieldX; prev.fieldY = newFieldY; prev.lastTs = now;
         }
     }
 
-    // ==================== TRAIL CHANNELS FROM GAME STATE ====================
-    function buildChannelsFromGameState() {
-        /**
-         * Build self/enemy trail channels from self-tracked trail data + walls + arrows.
-         * Trail data comes from persistent grids (updated by updateTrailTracking()),
-         * NOT from c.particles (which is always empty — cosmetic effects only).
-         */
-        const N = CFG.RES;
-        const NN = N * N;
+    // ==================== TRAIL CHANNELS: 512→128 DOWNSAMPLE ====================
+    // Precomputed wall mask at obs resolution (128x128)
+    const _wallMask = new Float32Array(CFG.RES * CFG.RES);
+    {
+        const N = CFG.RES, f = DS_FACTOR;
+        const top_ds = Math.floor(ARENA_OFFSET_Y / f);
+        const bot_ds = Math.min(N, Math.floor((ARENA_OFFSET_Y + ARENA_H_GSPP + f - 1) / f));
+        for (let r = 0; r < top_ds; r++) for (let c = 0; c < N; c++) _wallMask[r*N+c] = 1;
+        for (let r = bot_ds; r < N; r++) for (let c = 0; c < N; c++) _wallMask[r*N+c] = 1;
+        if (top_ds >= 0 && top_ds < N) for (let c = 0; c < N; c++) _wallMask[top_ds*N+c] = 1;
+        if (bot_ds > 0 && bot_ds <= N) for (let c = 0; c < N; c++) _wallMask[(bot_ds-1)*N+c] = 1;
+        for (let r = top_ds; r < bot_ds; r++) { _wallMask[r*N] = 1; _wallMask[r*N+N-1] = 1; }
+    }
 
-        // Start with persistent trail grids (accumulated over the round)
+    function buildChannelsFromGameState() {
+        /** Downsample 512x512 trailOwner to 128x128 using .any() pooling.
+         *  Matches env's _get_player_obs exactly. */
+        const N = CFG.RES, NN = N * N, A = ARENA_SIM, f = DS_FACTOR;
         const selfCh = new Float32Array(NN);
         const enemyCh = new Float32Array(NN);
-        if (S.selfTrail) selfCh.set(S.selfTrail);
-        if (S.enemyTrail) enemyCh.set(S.enemyTrail);
 
+        if (!S.trailOwner) return { self: selfCh, enemy: enemyCh };
+
+        // .any() downsample: if any pixel in the 4x4 block is set, obs pixel = 1
+        for (let or = 0; or < N; or++) {
+            for (let oc = 0; oc < N; oc++) {
+                let hasSelf = false, hasEnemy = false;
+                const baseR = or * f, baseC = oc * f;
+                for (let dy = 0; dy < f && !(hasSelf && hasEnemy); dy++) {
+                    const row = baseR + dy;
+                    for (let dx = 0; dx < f; dx++) {
+                        const v = S.trailOwner[row * A + baseC + dx];
+                        if (v === 1) hasSelf = true;
+                        else if (v === 2) hasEnemy = true;
+                    }
+                }
+                if (hasSelf) selfCh[or*N+oc] = 1;
+                if (hasEnemy) enemyCh[or*N+oc] = 1;
+            }
+        }
+
+        // Add wall mask
+        for (let i = 0; i < NN; i++) if (_wallMask[i]) selfCh[i] = 1;
+
+        // Direction arrows (5px at obs res)
         const round = pageWindow.gameGraphics?.gameEngine?.round;
         if (!round) return { self: selfCh, enemy: enemyCh };
-
         const curves = round.getCurves();
         const me = curves.find(c => c.player?.isMyPlayer);
         if (!me) return { self: selfCh, enemy: enemyCh };
 
-        // Wall mask matching env (curvecrash_env_ffa.py lines 223-237)
-        // top_ds=11, bot_ds=117 → rows 0-11 and 116-127 are wall
-        const top_ds = Math.floor(ARENA_OFFSET_Y / DS_FACTOR); // 11
-        const bot_ds = Math.min(N, Math.floor((ARENA_OFFSET_Y + ARENA_H_GSPP + DS_FACTOR - 1) / DS_FACTOR)); // 117
-        // Top wall band (rows 0 to top_ds-1)
-        for (let row = 0; row < top_ds; row++) {
-            for (let col = 0; col < N; col++) {
-                selfCh[row * N + col] = 1.0;
-            }
-        }
-        // Bottom wall band (rows bot_ds to N-1)
-        for (let row = bot_ds; row < N; row++) {
-            for (let col = 0; col < N; col++) {
-                selfCh[row * N + col] = 1.0;
-            }
-        }
-        // 1-pixel border at field edges
-        if (top_ds >= 0 && top_ds < N) {
-            for (let col = 0; col < N; col++) selfCh[top_ds * N + col] = 1.0; // row 11
-        }
-        if (bot_ds > 0 && bot_ds <= N) {
-            for (let col = 0; col < N; col++) selfCh[(bot_ds - 1) * N + col] = 1.0; // row 116
-        }
-        // Left/right columns within playable area
-        for (let row = top_ds; row < bot_ds; row++) {
-            selfCh[row * N] = 1.0;           // left col
-            selfCh[row * N + N - 1] = 1.0;   // right col
-        }
-
-        // Direction arrows for all alive players (5px in obs space, like env)
         for (const c of curves) {
             if (!c.state?.isAlive) continue;
             const isSelf = (c.curveId === me.curveId);
             const ch = isSelf ? selfCh : enemyCh;
-            const px = c.state.x * OBS_SCALE;
-            const py = c.state.y * OBS_SCALE + OBS_OFFSET_Y;
-            const cos_a = Math.cos(c.state.angle);
-            const sin_a = Math.sin(c.state.angle);
+            // Position in obs coords: field → sim → obs
+            const px = c.state.x * SIM_SCALE / f;
+            const py = (c.state.y * SIM_SCALE + ARENA_OFFSET_Y) / f;
+            const cos_a = Math.cos(c.state.angle), sin_a = Math.sin(c.state.angle);
             for (let t = 0; t < 5; t++) {
-                const ax = Math.round(px + cos_a * t);
-                const ay = Math.round(py + sin_a * t);
-                if (ax >= 0 && ax < N && ay >= 0 && ay < N) {
-                    ch[ay * N + ax] = 1.0;
-                }
+                const ax = Math.round(px + cos_a * t), ay = Math.round(py + sin_a * t);
+                if (ax >= 0 && ax < N && ay >= 0 && ay < N) ch[ay * N + ax] = 1;
             }
         }
 
@@ -632,8 +586,8 @@
             const me = curves.find(c => c.player?.isMyPlayer);
             for (const c of curves) {
                 if (!c.state?.isAlive || c === me) continue;
-                const ex = Math.round(c.state.x * OBS_SCALE);
-                const ey = Math.round(c.state.y * OBS_SCALE + OBS_OFFSET_Y);
+                const ex = Math.round((c.state.x * SIM_SCALE) / DS_FACTOR);
+                const ey = Math.round((c.state.y * SIM_SCALE + ARENA_OFFSET_Y) / DS_FACTOR);
                 const ei = ey * N + ex;
                 if (ei >= 0 && ei < NN && !blocked[ei]) {
                     territory[ei] = 2;
@@ -1036,10 +990,8 @@
             S.steps = 0;
             S.prevSelf = null;
             S.prevEnemy = null;
-            // Reset trail tracking grids for new round
-            const NN = CFG.RES * CFG.RES;
-            S.selfTrail = new Float32Array(NN);
-            S.enemyTrail = new Float32Array(NN);
+            // Reset trail tracking grid at sim resolution (512x512)
+            S.trailOwner = new Int8Array(ARENA_SIM * ARENA_SIM);
             S.prevTrailPos = {};
             if (S.model && S.model.hasGRU) {
                 S.gruState = new Float32Array(S.model.gruHidden);
@@ -1069,9 +1021,9 @@
         let selfCh, enemyCh;
         ({ self: selfCh, enemy: enemyCh } = buildChannelsFromGameState());
 
-        // Position and heading from game state (uniform scale + Y offset, matching env)
-        const headX = S.gsPosition.x * OBS_SCALE;
-        const headY = S.gsPosition.y * OBS_SCALE + OBS_OFFSET_Y;
+        // Position in obs coords: field → sim → obs (matching env's player.x/DS)
+        const headX = (S.gsPosition.x * SIM_SCALE) / DS_FACTOR;
+        const headY = (S.gsPosition.y * SIM_SCALE + ARENA_OFFSET_Y) / DS_FACTOR;
         const heading = S.gsAngle;
 
         S.idleFrames = 0;
@@ -1131,8 +1083,8 @@
         // Draw powerup locations (unrotated, world frame)
         if (S.gsPowerups.length > 0) {
             for (const pup of S.gsPowerups) {
-                const px = Math.round(pup.x * OBS_SCALE);
-                const py = Math.round(pup.y * OBS_SCALE + OBS_OFFSET_Y);
+                const px = Math.round((pup.x * SIM_SCALE) / DS_FACTOR);
+                const py = Math.round((pup.y * SIM_SCALE + ARENA_OFFSET_Y) / DS_FACTOR);
                 const isSpeed = pup.powerupId === 1;
                 for (let dy = -2; dy <= 2; dy++) {
                     for (let dx = -2; dx <= 2; dx++) {
@@ -1153,8 +1105,8 @@
 
         // Draw head position from game state
         if (S.gsAvailable && S.gsPosition) {
-            const hx = Math.round(S.gsPosition.x * OBS_SCALE);
-            const hy = Math.round(S.gsPosition.y * OBS_SCALE + OBS_OFFSET_Y);
+            const hx = Math.round((S.gsPosition.x * SIM_SCALE) / DS_FACTOR);
+            const hy = Math.round((S.gsPosition.y * SIM_SCALE + ARENA_OFFSET_Y) / DS_FACTOR);
             for (let dy = -1; dy <= 1; dy++) {
                 for (let dx = -1; dx <= 1; dx++) {
                     const px = hx + dx, py = hy + dy;
@@ -1365,7 +1317,7 @@
                 readGameState();
                 // Track trail positions at rAF rate (higher than decision rate)
                 // so we capture position updates between decision ticks
-                if (S.roundActive && S.selfTrail) {
+                if (S.roundActive && S.trailOwner) {
                     updateTrailTracking();
                 }
                 if (S.enabled) decisionTick();
