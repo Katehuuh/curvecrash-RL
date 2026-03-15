@@ -14,60 +14,57 @@ python watch_agent_ffa.py --checkpoint checkpoints/agent_final.pt --gspp
 
 ## Files
 
-- `curvecrash_env_ffa.py` — module, Gym environment (512x512 arena, FFA, powerups)
-- `train_selfplay.py` — PPO + PFSP self-play training loop
-- `experiments.py` — Model architectures (IMPALA-CNN, Voronoi wrapper)
-- `watch_agent_ffa.py` — UI only, Pygame viewer for local evaluation
-- `replay_pipeline.py` — Scrape replays, render to observations, produce BC data
-- `export_model.py` — Convert PyTorch checkpoint to TensorFlow.js
-- `CurveCrash-AI-v6.user.js` — Browser userscript for live play
-- `index.html` — Standalone browser demo (GitHub Pages)
+`curvecrash_env_ffa.py` is the gym env, 512x512 arena with FFA and powerups. `train_selfplay.py` runs PPO with PFSP self-play. `experiments.py` has the model architectures (IMPALA-CNN, Voronoi wrapper). `watch_agent_ffa.py` is just a pygame viewer. `replay_pipeline.py` scrapes human replays and renders them into BC training data. `export_model.py` converts checkpoints to TF.js JSON. `CurveCrash-AI-v6.user.js` runs the model on the real site. `index.html` is the standalone browser demo.
 
 <details>
-<summary>What failed</summary>
+<summary>11 versions trained, one real breakthrough (ego-centric rotation), the rest plateaued at ~65%</summary>
 
-| Version | Idea | Result |
-|---------|------|--------|
-| v1 | NatureCNN 1.6M params, 256x256 obs | Entropy collapsed. Clockwise circles. |
-| v2 | Shrunk to 67K params, 128x128 | No collapse, but 6s survival (worse than eyes closed) |
-| v3 | **Ego-centric rotation** | **10x breakthrough** — 39s survival. Only real architectural win. |
-| v4 | NatureCNN 669K, self-play | 24-29% WR. Camps but gets trapped by humans. |
-| v5 | Added GRU(64), exploiter training | 33% WR vs v4. Learned aggression but loose camping. |
-| v6 | GS++ mode (powerups), GRU(128), CBAM | ~86s survival vs random. Solid but not strategic. |
-| v8 | IMPALA-CNN + Voronoi, 2.3M params | **~65% WR self-play (best).** Survives but passive. |
-| v9 | BC warmstart from human replays | **Poisoned action dist (34% spin).** PPO couldn't recover. |
-| v9.1 | No BC, higher target_kl | Plateaued at 25% WR |
-| v10 | Territory + proximity rewards, scalar obs | 72% peak then **collapsed to 45%** (reward annealing) |
-| v11 | Minimap channels, no annealing | Same ~65% ceiling. Prevented collapse but no breakthrough. |
-| Safety shield | Inference-time tree search | 3-action, 5px/step. Can't differentiate. |
-| BC-only | Supervised learning from 879K human frames | 73% accuracy, drives straight into walls. |
+## What failed
 
-### What about the replay data?
+| Version | What we tried | What happened |
+|---------|--------------|---------------|
+| v1 | NatureCNN 1.6M params, 256x256 obs | Entropy collapsed. Agent did clockwise circles forever. |
+| v2 | Shrunk to 67K params, 128x128 | Stopped collapsing but survived 6s. Worse than playing with eyes closed. |
+| v3 | Rotated obs so ego always faces right | 10x jump to 39s survival. The only change that actually mattered. |
+| v4 | NatureCNN 669K, self-play pool | 24-29% WR. Camps territory but any human can box it in. |
+| v5 | Added GRU(64), exploiter opponents | 33% WR vs v4. Picked up aggression, camping still loose. |
+| v6 | GS++ powerups, GRU bumped to 128, CBAM | ~86s vs random. Works, nothing exciting. |
+| v8 | IMPALA-CNN + Voronoi territory, 2.3M params | ~65% WR in self-play. Best we got. Survives but has zero strategy. |
+| v9 | BC warmstart from 879K human replay frames | Wrecked the policy. 34% of actions became spins. PPO couldn't fix it because target_kl=0.015 kills updates after 1-2 epochs. We tried this twice, failed both times. |
+| v9.1 | Same thing minus BC, target_kl raised to 0.03 | Plateaued at 25%. Voronoi fix made opponents stronger and the agent didn't adapt. |
+| v10 | Territory + proximity rewards, 13 scalar obs (ray distances etc) | Hit 72% then collapsed to 45%. Turns out annealing rewards mid-training destroys what was learned. |
+| v11 | Added minimap channels, dropped the annealing | Same 65% ceiling. Didn't collapse anymore but didn't improve either. |
+| Safety shield | Tree search at inference (9-24 frame lookahead) | Useless. 3 discrete actions moving 5px/step in a 512px arena, there's nothing to differentiate. |
+| BC-only | Pure supervised on human replays | 73% action accuracy. Drives straight into walls. It learned "go straight 44% of the time" from the data average instead of "go straight when it's safe." |
 
-`replay_pipeline.py` scrapes elite human games (ELO 1600-2200) from curvecrash.com and renders 879K (obs, action) frames. We tried using this data three ways — all failed:
+## What about the replay data?
 
-**BC warmstart** (pre-train on human data, then PPO): Corrupted the policy. Action distribution shifted from balanced 53/4/43 L/S/R to 24% straight + 34% spin. PPO with target_kl=0.015 early-stops after 1-2 epochs, so it couldn't undo the damage. Weight drift was only 0.0066 across 5M steps — training barely moved. We made this mistake twice (v9 + an earlier BC experiment).
+`replay_pipeline.py` scrapes elite games (ELO 1600-2200) and renders 879K observation/action frames. We used it three ways, all failed.
 
-**BC auxiliary loss** (small cross-entropy on human data during PPO): Minor effect. 38% WR vs 20% baseline at 1M steps, but didn't change the ceiling. The BC signal is too weak relative to PPO gradients.
+BC warmstart corrupted the policy so badly that PPO couldn't recover across 5M steps. The action distribution shifted from a balanced 53/4/43 left/straight/right to 24% straight + 34% spin. Weight drift was 0.0066 total. Training basically froze.
 
-**BC-only** (pure supervised): 73% action accuracy but the agent can't play. BC learns "go straight 44% of the time" from the data average, not "go straight WHEN it's safe." Context-dependent decisions require reasoning the model can't extract from single frames.
+BC as auxiliary loss during PPO did almost nothing. 38% WR vs 20% baseline at 1M steps, but the ceiling stayed the same. PPO gradients just overwhelm the BC signal.
 
-**Untested idea**: interleaved self-play and replay — let self-play learn survival (which it's good at), then periodically fine-tune on replays for strategy (which humans are good at), then back to self-play to "heal" the distribution. The theory: self-play alone learns survival but not strategy; replays alone learn strategy but not survival; alternating might get both. Risk: same BC poisoning problem if the replay signal is too strong.
+BC alone got 73% accuracy imitating humans, then drove into walls. It memorized the average action distribution without learning when each action is appropriate. Makes sense, 3 actions with long-horizon consequences can't be captured frame-by-frame.
 
-The replay data itself is valid (physics-validated, correctly rendered after fixing a bug where all action labels were wrong). The problem is BC fundamentally — 3 discrete actions with long-horizon strategic dependencies can't be captured from imitation.
+One thing we never tried: alternating between self-play and replay fine-tuning. Self-play learns survival (good at that), replays could teach strategy (humans are good at that), then self-play heals whatever BC broke. Might work, might just poison it again.
 
-### Architecture
+The data itself is fine. We had a bug where `turningDirection` always returned 0 so all labels were "straight," but that got fixed and re-rendered. The problem is imitation learning on this task, not the data.
+
+## Architecture
 
 ```
-Input: 7ch ego-centric 128x128 (self/enemy trails, prev frame, speed/erase powerups, Voronoi territory)
-  → IMPALA Block(7→16)   → Conv3x3 + MaxPool + 2×Residual → 64x64
-  → IMPALA Block(16→32)  → Conv3x3 + MaxPool + 2×Residual → 32x32
-  → IMPALA Block(32→32)  → Conv3x3 + MaxPool + 2×Residual → 16x16
-  → CBAM(32)             → channel + spatial attention
-  → Flatten(32×16×16=8192) → FC(8192→256)
-  → GRU(256→128)         → temporal memory across frames
-  → Actor(128→3)         → [LEFT, STRAIGHT, RIGHT]
-  → Critic(128→1)        → value estimate
+7ch ego-centric 128x128 (self/enemy trails, prev frame, speed/erase powerups, Voronoi territory)
+  IMPALA Block(7>16)   Conv3x3 + MaxPool + 2x Residual > 64x64
+  IMPALA Block(16>32)  Conv3x3 + MaxPool + 2x Residual > 32x32
+  IMPALA Block(32>32)  Conv3x3 + MaxPool + 2x Residual > 16x16
+  CBAM(32)             channel + spatial attention
+  Flatten(32x16x16=8192) > FC(8192>256)
+  GRU(256>128)         temporal memory across frames
+  Actor(128>3)         LEFT, STRAIGHT, RIGHT
+  Critic(128>1)        value estimate
 ```
+
+2,344,934 parameters.
 
 </details>
