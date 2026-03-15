@@ -54,7 +54,7 @@ The data itself is fine. We had a bug where `turningDirection` always returned 0
 ## Architecture
 
 ```
-7ch ego-centric 128x128 (self/enemy trails, prev frame, speed/erase powerups, Voronoi territory)
+Input: 7ch ego-centric 128x128 (self/enemy trails, prev frame, speed/erase powerups, Voronoi territory)
   IMPALA Block(7>16)   Conv3x3 + MaxPool + 2x Residual > 64x64
   IMPALA Block(16>32)  Conv3x3 + MaxPool + 2x Residual > 32x32
   IMPALA Block(32>32)  Conv3x3 + MaxPool + 2x Residual > 16x16
@@ -66,5 +66,21 @@ The data itself is fine. We had a bug where `turningDirection` always returned 0
 ```
 
 2,344,934 parameters.
+
+## Lessons (save yourself time if you fork this)
+
+Ego-centric rotation was the single biggest win across 11 versions. Before v3, the obs was world-aligned (fixed top-down) but actions were ego-relative (left/right/straight). The agent couldn't learn the mapping. Centering on the player and rotating so ego always faces right gave a 10x survival jump overnight.
+
+Self-play cycling killed multiple training runs. Every time a new snapshot got added to the opponent pool, win rate crashed 30-50%. The agent develops strategy X, then plays against itself using strategy X, and can't beat its own clone. PFSP (prioritized fictitious self-play) helped, sampling opponents you lose to more often instead of 80/20 recent/old.
+
+target_kl=0.015 freezes learning. PPO early-stops the epoch loop after 1-2 updates, so the policy barely moves. We wasted a 5M step v9 run before realizing this. 0.03 or higher lets the agent actually learn.
+
+Watch for reward double-counting. We had kills getting 0.5 from the env + 0.1 from the training loop = 0.6 total, value normalization breaking GAE, and all 8 parallel envs facing the same opponent (correlated batch). These are easy to miss and hard to diagnose from metrics alone.
+
+The .any() boolean downsampling from 512 to 128 matters more than you'd think. The env draws trails at 512x512 then pools 4x4 blocks with .any(), so a single trail pixel bloats to fill the whole obs block. If your browser code or export pipeline doesn't match this, the AI sees thinner trails than it trained on and crashes into everything.
+
+Don't mmap random-access large files on Windows. Our 80GB BC obs file filled 32GB RAM through page faults. Load a random subset into RAM instead (~40K frames fits in ~4GB).
+
+Voronoi territory is standard for Tron games. The BFS flood-fill channel showing "cells you can reach before any opponent" is what every competitive Tron bot uses (confirmed by University of Groningen's 2018 ICAART paper). Without it the agent has no spatial planning signal.
 
 </details>
