@@ -16,12 +16,33 @@ python watch_agent_ffa.py --checkpoint checkpoints/agent_final.pt --gspp
 
 | Version | Idea | Result |
 |---------|------|--------|
-| v8 | IMPALA-CNN + CBAM + GRU(128), 2.3M params | ~65% WR self-play. Beats random, loses to top-200 humans. |
-| v9 | Behavior cloning warmstart | Poisoned action distribution. PPO couldn't recover. |
-| v9.1 | Higher target_kl, fixed Voronoi | Plateaued at 25% WR |
-| v10 | Territory + proximity rewards, scalar obs | 72% peak then collapsed to 45% (reward annealing) |
-| v11 | Bilinear downsampling, fixed-orientation minimap, no annealing | Same ~65% ceiling. Prevented collapse but didn't break through. |
-| Safety shield | Inference-time tree search / beam search | 3-action space moves ~5px/step in 512px arena. No differentiation. |
+| v1 | NatureCNN 1.6M params, 256x256 obs | Entropy collapsed. Clockwise circles. |
+| v2 | Shrunk to 67K params, 128x128 | No collapse, but 6s survival (worse than eyes closed) |
+| v3 | **Ego-centric rotation** | **10x breakthrough** — 39s survival. Only real architectural win. |
+| v4 | NatureCNN 669K, self-play | 24-29% WR. Camps but gets trapped by humans. |
+| v5 | Added GRU(64), exploiter training | 33% WR vs v4. Learned aggression but loose camping. |
+| v6 | GS++ mode (powerups), GRU(128), CBAM | ~86s survival vs random. Solid but not strategic. |
+| v8 | IMPALA-CNN + Voronoi, 2.3M params | **~65% WR self-play (best).** Survives but passive. |
+| v9 | BC warmstart from human replays | **Poisoned action dist (34% spin).** PPO couldn't recover. |
+| v9.1 | No BC, higher target_kl | Plateaued at 25% WR |
+| v10 | Territory + proximity rewards, scalar obs | 72% peak then **collapsed to 45%** (reward annealing) |
+| v11 | Minimap channels, no annealing | Same ~65% ceiling. Prevented collapse but no breakthrough. |
+| Safety shield | Inference-time tree search | 3-action, 5px/step. Can't differentiate. |
+| BC-only | Supervised learning from 879K human frames | 73% accuracy, drives straight into walls. |
+
+## What about the replay data?
+
+`replay_pipeline.py` scrapes elite human games (ELO 1600-2200) from curvecrash.com and renders 879K (obs, action) frames. We tried using this data three ways — all failed:
+
+**BC warmstart** (pre-train on human data, then PPO): Corrupted the policy. Action distribution shifted from balanced 53/4/43 L/S/R to 24% straight + 34% spin. PPO with target_kl=0.015 early-stops after 1-2 epochs, so it couldn't undo the damage. Weight drift was only 0.0066 across 5M steps — training barely moved. We made this mistake twice (v9 + an earlier BC experiment).
+
+**BC auxiliary loss** (small cross-entropy on human data during PPO): Minor effect. 38% WR vs 20% baseline at 1M steps, but didn't change the ceiling. The BC signal is too weak relative to PPO gradients.
+
+**BC-only** (pure supervised): 73% action accuracy but the agent can't play. BC learns "go straight 44% of the time" from the data average, not "go straight WHEN it's safe." Context-dependent decisions require reasoning the model can't extract from single frames.
+
+**Untested idea**: interleaved self-play and replay — let self-play learn survival (which it's good at), then periodically fine-tune on replays for strategy (which humans are good at), then back to self-play to "heal" the distribution. The theory: self-play alone learns survival but not strategy; replays alone learn strategy but not survival; alternating might get both. Risk: same BC poisoning problem if the replay signal is too strong.
+
+The replay data itself is valid (physics-validated, correctly rendered after fixing a bug where all action labels were wrong). The problem is BC fundamentally — 3 discrete actions with long-horizon strategic dependencies can't be captured from imitation.
 
 ## Architecture
 
