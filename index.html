@@ -46,7 +46,7 @@ canvas#game { background:#0d0d18; border:2px solid #1a1a2e; border-radius:4px; i
     <div>
       <div style="font-size:12px;color:#888;margin-bottom:4px">AI Model</div>
       <select id="model-sel" style="width:100%;padding:4px;background:#1a1a2e;color:#0f0;border:1px solid #333;border-radius:3px;font-size:12px;font-family:monospace">
-        <option value="curvecrash_v8_weights.json" selected>v8 IMPALA 7ch (best)</option>
+        <option value="models/v8.json" selected>v8 IMPALA 7ch (best)</option>
         <option value="models/v11.json">v11 IMPALA 9ch + scalars</option>
         <option value="models/v9.json">v9 IMPALA 7ch</option>
         <option value="models/v9_1.json">v9.1 IMPALA 7ch</option>
@@ -858,7 +858,7 @@ function gameLoop(ts) {
 
 // ======================== AUTO-LOAD + INIT ========================
 async function autoLoadWeights() {
-  await loadModelFromURL('curvecrash_v8_weights.json');
+  await loadModelFromURL('models/v8.json');
 }
 
 async function init() {
