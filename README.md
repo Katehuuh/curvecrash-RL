@@ -83,4 +83,16 @@ Don't mmap random-access large files on Windows. Our 80GB BC obs file filled 32G
 
 Voronoi territory is standard for Tron games. The BFS flood-fill channel showing "cells you can reach before any opponent" is what every competitive Tron bot uses (confirmed by University of Groningen's 2018 ICAART paper). Without it the agent has no spatial planning signal.
 
+Physics got corrected twice. The original sim assumed a square arena. The real GS++ game runs 922x763, which maps to a 512x424 rectangle inside the 512x512 grid with 44px offset bands top and bottom. Collision sweep (checking every pixel along the movement path, not just the endpoint) and distance-based gaps (fixed length in pixels regardless of speed) were also wrong initially. v5.1 was scrapped and v6 started fresh because of this.
+
+## What's still open
+
+Is the 65% ceiling because of the architecture (2.3M params with 3 discrete actions can't represent strategy) or the training (PPO + self-play just doesn't converge to strategic play)? Nobody knows. v10 added scalar obs and territory rewards and still hit the same wall.
+
+League training (AlphaStar-style main agent + exploiters + frozen champions) might break through but it's a multi-week engineering project. We had a simple exploiter phase in v5 that helped with aggression, but nothing close to a full league.
+
+Continuous actions (steering angle instead of left/straight/right) would give finer control. The 3-action space moves ~5px per step in a 512px arena. Two of three actions (left/right) do almost the same thing at any given moment, which makes tree search and reward shaping both struggle to differentiate.
+
+The browser will always see different observations than training. The real game sends position updates at 3-10Hz, the training env runs at 60fps. Trail density in the userscript is inherently sparser no matter how well the observation pipeline matches. The 512x512 sim grid with .any() downsampling helps but doesn't fully close the gap.
+
 </details>
